@@ -365,6 +365,32 @@ std::string join_path(const std::string& dir, const std::string& name) {
 #endif
 }
 
+uint32_t http_bind_address() {
+    const char* bind = std::getenv("TTRANS_HTTP_BIND");
+    if (!bind || !*bind || std::string(bind) == "127.0.0.1" || std::string(bind) == "localhost") {
+        return htonl(INADDR_LOOPBACK);
+    }
+    if (std::string(bind) == "0.0.0.0" || std::string(bind) == "*") {
+        return htonl(INADDR_ANY);
+    }
+    const auto parsed = inet_addr(bind);
+    if (parsed == INADDR_NONE) {
+        return htonl(INADDR_LOOPBACK);
+    }
+    return parsed;
+}
+
+std::string public_gui_host() {
+    const char* bind = std::getenv("TTRANS_HTTP_BIND");
+    if (bind && (std::string(bind) == "0.0.0.0" || std::string(bind) == "*")) {
+        return "127.0.0.1";
+    }
+    if (bind && *bind && std::string(bind) != "localhost") {
+        return bind;
+    }
+    return "127.0.0.1";
+}
+
 std::string page_html() {
     return R"HTML(<!doctype html>
 <html lang="en">
@@ -605,7 +631,7 @@ int run_web_gui(uint16_t http_port, const TransferOptions& options) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = http_bind_address();
     addr.sin_port = htons(http_port);
     if (bind(server, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 || listen(server, 16) != 0) {
         close_tcp(server);
@@ -613,7 +639,7 @@ int run_web_gui(uint16_t http_port, const TransferOptions& options) {
         return 2;
     }
 
-    const std::string url = "http://127.0.0.1:" + std::to_string(http_port);
+    const std::string url = "http://" + public_gui_host() + ":" + std::to_string(http_port);
     gui_log("GUI ready at " + url);
     std::cout << "TTrans GUI: " << url << "\n";
     std::cout << "Press Ctrl+C to stop.\n";

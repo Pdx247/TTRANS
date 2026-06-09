@@ -1,7 +1,12 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 & "$root\scripts\build_windows.ps1"
-$pkg = Join-Path $root "dist\TTrans-windows-portable.zip"
+$packageDir = Join-Path $root "dist\TTrans-windows"
+$pkg = Join-Path $root "dist\TTrans-windows-installer.zip"
+if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
+New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+Copy-Item -Force -Path (Join-Path $root "dist\ttrans.exe") -Destination (Join-Path $packageDir "ttrans.exe")
+Copy-Item -Force -Path (Join-Path $root "packaging\windows\*") -Destination $packageDir
 if (Test-Path $pkg) { Remove-Item $pkg }
-Compress-Archive -Path (Join-Path $root "dist\ttrans.exe") -DestinationPath $pkg
+Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $pkg
 Write-Host "Packaged $pkg"

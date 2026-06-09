@@ -1,0 +1,48 @@
+name: Build packages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: mingw-w64-x86_64-gcc
+      - name: Build and package
+        shell: pwsh
+        run: |
+          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
+          .\scripts\package_windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTrans-windows-installer
+          path: dist/TTrans-windows-installer.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package
+        run: sh scripts/package_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTrans-linux-elf
+          path: dist/TTrans-linux-elf.tar.gz
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package
+        run: sh scripts/package_macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TTrans-macos-dmg
+          path: dist/TTrans-macos.dmg
