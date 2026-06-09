@@ -1,0 +1,9 @@
+build/
+dist/
+downloads/
+*.o
+*.obj
+*.exe
+*.tar.gz
+*.zip
+*.dmg
