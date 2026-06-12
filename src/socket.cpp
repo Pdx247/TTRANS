@@ -109,6 +109,24 @@ bool UdpSocket::set_broadcast(bool enabled) {
 #endif
 }
 
+bool UdpSocket::join_multicast(const std::string& group) {
+    ip_mreq membership{};
+    membership.imr_multiaddr.s_addr = inet_addr(group.c_str());
+    membership.imr_interface.s_addr = htonl(INADDR_ANY);
+    if (membership.imr_multiaddr.s_addr == INADDR_NONE) {
+        return false;
+    }
+#ifdef _WIN32
+    return setsockopt(native(handle_),
+                      IPPROTO_IP,
+                      IP_ADD_MEMBERSHIP,
+                      reinterpret_cast<const char*>(&membership),
+                      sizeof(membership)) == 0;
+#else
+    return setsockopt(native(handle_), IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, sizeof(membership)) == 0;
+#endif
+}
+
 bool UdpSocket::send_bytes(const std::string& host, uint16_t port, const uint8_t* data, std::size_t size) {
 #ifdef _WIN32
     sockaddr_in addr{};

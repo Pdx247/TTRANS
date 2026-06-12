@@ -43,6 +43,7 @@ namespace ttrans {
 namespace {
 
 constexpr uint16_t kFixedUdpPort = 44777;
+constexpr const char* kDiscoveryMulticast = "239.255.77.77";
 constexpr const char* kGithubUrl = "https://github.com/Pdx247/TTRANS";
 
 ImFont* g_icon_solid = nullptr;
@@ -309,12 +310,56 @@ std::string broadcast_from_ip_mask(const std::string& ip, const std::string& mas
     return u32_to_ipv4((ip_value & mask_value) | (~mask_value));
 }
 
+bool same_network(const std::string& ip, const LocalNetwork& network) {
+    uint32_t ip_value = 0;
+    uint32_t local_value = 0;
+    uint32_t mask_value = 0;
+    if (!ipv4_to_u32(ip, ip_value) || !ipv4_to_u32(network.ip, local_value)) {
+        return false;
+    }
+    if (!network.subnet_mask.empty() && ipv4_to_u32(network.subnet_mask, mask_value) && mask_value != 0) {
+        return (ip_value & mask_value) == (local_value & mask_value);
+    }
+    return (ip_value & 0xffffff00u) == (local_value & 0xffffff00u);
+}
+
 std::string legacy_last_octet_broadcast(const std::string& ip) {
     const auto dot = ip.find_last_of('.');
     if (dot == std::string::npos || ip == "127.0.0.1") {
         return {};
     }
     return ip.substr(0, dot + 1) + "255";
+}
+
+std::vector<std::string> arp_cache_ips() {
+#ifdef _WIN32
+    return extract_ipv4_addresses(read_command_all("arp -a"));
+#else
+    auto ips = extract_ipv4_addresses(read_command_all("ip neigh 2>/dev/null"));
+    const auto arp_ips = extract_ipv4_addresses(read_command_all("arp -an 2>/dev/null"));
+    for (const auto& ip : arp_ips) {
+        if (std::find(ips.begin(), ips.end(), ip) == ips.end()) {
+            ips.push_back(ip);
+        }
+    }
+    return ips;
+#endif
+}
+
+std::vector<std::string> local_24_scan_ips(const std::string& ip) {
+    std::vector<std::string> targets;
+    uint32_t value = 0;
+    if (!ipv4_to_u32(ip, value) || ip == "127.0.0.1") {
+        return targets;
+    }
+    const uint32_t base = value & 0xffffff00u;
+    for (uint32_t host = 1; host < 255; ++host) {
+        const auto candidate = u32_to_ipv4(base | host);
+        if (candidate != ip) {
+            targets.push_back(candidate);
+        }
+    }
+    return targets;
 }
 
 void add_unique_string(std::vector<std::string>& values, const std::string& value) {
@@ -843,9 +888,29 @@ std::vector<std::string> broadcast_targets(const std::vector<LocalNetwork>& netw
     std::vector<std::string> targets;
     add_unique_string(targets, "127.0.0.1");
     add_unique_string(targets, "255.255.255.255");
+    add_unique_string(targets, kDiscoveryMulticast);
     for (const auto& network : networks) {
         add_unique_string(targets, network.broadcast);
         add_unique_string(targets, legacy_last_octet_broadcast(network.ip));
+    }
+    return targets;
+}
+
+std::vector<std::string> discovery_targets(const std::vector<LocalNetwork>& networks) {
+    auto targets = broadcast_targets(networks);
+    const auto cached_ips = arp_cache_ips();
+    for (const auto& ip : cached_ips) {
+        for (const auto& network : networks) {
+            if (same_network(ip, network) && ip != network.ip) {
+                add_unique_string(targets, ip);
+                break;
+            }
+        }
+    }
+    for (const auto& network : networks) {
+        for (const auto& ip : local_24_scan_ips(network.ip)) {
+            add_unique_string(targets, ip);
+        }
     }
     return targets;
 }
@@ -860,7 +925,7 @@ void start_discovery(GuiState& state) {
     state.stop_discovery = false;
     state.discovering = true;
     upsert_peer(state, "127.0.0.1", "Loopback");
-    const auto targets = broadcast_targets(state.local_networks);
+    const auto targets = discovery_targets(state.local_networks);
     state.discovery = std::thread([&state, targets] {
         for (int round = 0; round < 4 && !state.stop_discovery.load(); ++round) {
             UdpSocket sock;
@@ -1117,6 +1182,7 @@ void draw_left_panel(GuiState& state) {
     if (state.discovering.load()) {
         ImGui::EndDisabled();
     }
+    ImGui::TextDisabled("UDP %u", kFixedUdpPort);
     ImGui::Dummy(ImVec2(1, 6));
     if (secondary_button(state.dark_mode ? "Day" : "Night", ImVec2(-1, 34))) {
         state.dark_mode = !state.dark_mode;

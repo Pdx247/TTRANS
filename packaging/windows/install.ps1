@@ -16,6 +16,7 @@ Copy-Item -Force -Path (Join-Path $source "assets\FONT-AWESOME-LICENSE.txt") -De
 Copy-Item -Force -Path (Join-Path $source "start_gui.cmd") -Destination (Join-Path $installDir "start_gui.cmd")
 Copy-Item -Force -Path (Join-Path $source "uninstall.cmd") -Destination (Join-Path $installDir "uninstall.cmd")
 Copy-Item -Force -Path (Join-Path $source "uninstall.ps1") -Destination (Join-Path $installDir "uninstall.ps1")
+Copy-Item -Force -Path (Join-Path $source "firewall.ps1") -Destination (Join-Path $installDir "firewall.ps1")
 
 $desktop = [Environment]::GetFolderPath("Desktop")
 $shell = New-Object -ComObject WScript.Shell
@@ -38,6 +39,24 @@ $uninstallShortcut = $shell.CreateShortcut((Join-Path $startMenuDir "Uninstall T
 $uninstallShortcut.TargetPath = Join-Path $installDir "uninstall.cmd"
 $uninstallShortcut.WorkingDirectory = $installDir
 $uninstallShortcut.Save()
+
+try {
+    $firewallScript = Join-Path $installDir "firewall.ps1"
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if ($isAdmin) {
+        & $firewallScript -InstallDir $installDir
+    } else {
+        Write-Host "Requesting Windows Firewall permission for UDP 44777..."
+        Start-Process powershell `
+            -Verb RunAs `
+            -Wait `
+            -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$firewallScript`"", "-InstallDir", "`"$installDir`"")
+    }
+} catch {
+    Write-Host "Firewall rule was not added. If peer search fails, allow TTrans on Private networks or open UDP 44777."
+}
 
 Write-Host "TTrans installed to $installDir"
 Write-Host "Desktop shortcut created: TTrans"

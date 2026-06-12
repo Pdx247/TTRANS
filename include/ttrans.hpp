@@ -72,6 +72,7 @@ public:
     bool bind_port(uint16_t port);
     bool set_timeout(int timeout_ms);
     bool set_broadcast(bool enabled);
+    bool join_multicast(const std::string& group);
     bool send_bytes(const std::string& host, uint16_t port, const uint8_t* data, std::size_t size);
     bool recv_bytes(std::vector<uint8_t>& data, Endpoint& from, std::size_t max_size);
 

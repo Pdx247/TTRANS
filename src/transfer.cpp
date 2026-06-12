@@ -679,6 +679,7 @@ bool receive_forever(uint16_t port,
         log_line(log, "Unable to bind UDP port " + std::to_string(port));
         return false;
     }
+    sock.join_multicast("239.255.77.77");
 
     log_line(log, "Listening on UDP port " + std::to_string(port));
     Endpoint peer;
