@@ -150,10 +150,171 @@ bool send_with_ack(UdpSocket& sock,
     return false;
 }
 
+void send_control(UdpSocket& sock, const Endpoint& peer, PacketType type, uint32_t session, uint32_t seq, uint32_t total) {
+    Packet packet;
+    packet.type = type;
+    packet.session = session;
+    packet.seq = seq;
+    packet.total = total;
+    const auto bytes = encode_packet(packet);
+    sock.send_bytes(peer.host, peer.port, bytes.data(), bytes.size());
+}
+
+void log_line(const LogFn& log, const std::string& line);
+
+IncomingFile parse_incoming_file(const Packet& meta, const Endpoint& peer) {
+    const std::string meta_payload(meta.payload.begin(), meta.payload.end());
+    const auto split = meta_payload.find('\n');
+    IncomingFile info;
+    info.filename = filename_only(split == std::string::npos ? meta_payload : meta_payload.substr(0, split));
+    info.checksum = split == std::string::npos ? std::string{} : meta_payload.substr(split + 1);
+    info.peer_host = peer.host;
+    info.peer_port = peer.port;
+    info.session = meta.session;
+    info.total_chunks = meta.total;
+    info.file_size = meta.file_size;
+    return info;
+}
+
+std::string preserved_output_path(const std::string& dir, const std::string& name) {
+    make_dirs(dir);
+    return join_path(dir, name);
+}
+
+bool wait_for_meta_accept(UdpSocket& sock,
+                          const std::string& host,
+                          uint16_t port,
+                          const Packet& meta,
+                          const TransferOptions& options,
+                          const LogFn& log) {
+    const auto encoded = encode_packet(meta);
+    int attempts = 0;
+    int wait_rounds = 0;
+    bool wait_logged = false;
+    while (attempts < options.retries && wait_rounds < 300) {
+        if (!sock.send_bytes(host, port, encoded.data(), encoded.size())) {
+            return false;
+        }
+
+        Endpoint from;
+        std::vector<uint8_t> raw;
+        bool peer_waiting = false;
+        while (sock.recv_bytes(raw, from, kMaxDatagram)) {
+            Packet response;
+            if (!decode_packet(raw.data(), raw.size(), response) ||
+                response.session != meta.session ||
+                response.seq != meta.seq) {
+                continue;
+            }
+            if (response.type == PacketType::MetaAck) {
+                return true;
+            }
+            if (response.type == PacketType::MetaReject) {
+                log_line(log, "Receiver rejected the file.");
+                return false;
+            }
+            if (response.type == PacketType::MetaWait) {
+                peer_waiting = true;
+                if (!wait_logged) {
+                    log_line(log, "Receiver is asking for user confirmation...");
+                    wait_logged = true;
+                }
+                break;
+            }
+        }
+
+        if (peer_waiting) {
+            ++wait_rounds;
+        } else {
+            ++attempts;
+        }
+    }
+    return false;
+}
+
 void log_line(const LogFn& log, const std::string& line) {
     if (log) {
         log(line);
     }
+}
+
+bool receive_accepted_session(UdpSocket& sock,
+                              const Packet& meta,
+                              const Endpoint& peer,
+                              const std::string& output_dir,
+                              const IncomingFile& info,
+                              const LogFn& log) {
+    const auto out_path = preserved_output_path(output_dir, info.filename);
+    send_control(sock, peer, PacketType::MetaAck, meta.session, meta.seq, meta.total);
+
+    log_line(log, "Receiving " + info.filename + " from " + peer.host + ":" + std::to_string(peer.port));
+    std::ofstream out(out_path, std::ios::binary);
+    if (!out) {
+        log_line(log, "Unable to open output path: " + out_path);
+        return false;
+    }
+
+    uint64_t hash = 14695981039346656037ull;
+    uint32_t expected_seq = 1;
+    Endpoint from;
+    std::vector<uint8_t> raw;
+    while (expected_seq <= meta.total) {
+        if (!sock.recv_bytes(raw, from, kMaxDatagram)) {
+            continue;
+        }
+        Packet chunk;
+        if (!decode_packet(raw.data(), raw.size(), chunk) || chunk.session != meta.session) {
+            continue;
+        }
+        if (chunk.type == PacketType::Meta) {
+            send_control(sock, peer, PacketType::MetaAck, meta.session, meta.seq, meta.total);
+            continue;
+        }
+        if (chunk.type != PacketType::Data) {
+            continue;
+        }
+        send_control(sock, peer, PacketType::DataAck, meta.session, chunk.seq, meta.total);
+        if (chunk.seq != expected_seq) {
+            continue;
+        }
+        out.write(reinterpret_cast<const char*>(chunk.payload.data()), static_cast<std::streamsize>(chunk.payload.size()));
+        for (auto b : chunk.payload) {
+            hash ^= b;
+            hash *= 1099511628211ull;
+        }
+        if (expected_seq % 64 == 0 || expected_seq == meta.total) {
+            log_line(log, "Progress " + std::to_string(expected_seq) + "/" + std::to_string(meta.total));
+        }
+        ++expected_seq;
+    }
+    out.close();
+
+    while (true) {
+        if (!sock.recv_bytes(raw, from, kMaxDatagram)) {
+            continue;
+        }
+        Packet done;
+        if (!decode_packet(raw.data(), raw.size(), done) || done.session != meta.session) {
+            continue;
+        }
+        if (done.type == PacketType::Meta) {
+            send_control(sock, peer, PacketType::MetaAck, meta.session, meta.seq, meta.total);
+            continue;
+        }
+        if (done.type != PacketType::Done) {
+            continue;
+        }
+        send_control(sock, peer, PacketType::DoneAck, meta.session, done.seq, meta.total);
+        break;
+    }
+
+    const auto actual_digest = hex64(hash);
+    if (!info.checksum.empty() && actual_digest != info.checksum) {
+        log_line(log, "Checksum mismatch. expected=" + info.checksum + " actual=" + actual_digest);
+        return false;
+    }
+    log_line(log, "Saved to " + out_path + " checksum=" + actual_digest);
+    return true;
 }
 
 } // namespace
@@ -203,7 +364,7 @@ bool send_file(const std::string& host,
     meta.payload.assign(payload.begin(), payload.end());
 
     log_line(log, "Sending " + name + " (" + std::to_string(file_size) + " bytes) to " + host + ":" + std::to_string(port));
-    if (!send_with_ack(sock, host, port, meta, PacketType::MetaAck, options)) {
+    if (!wait_for_meta_accept(sock, host, port, meta, options, log)) {
         log_line(log, "Receiver did not acknowledge metadata.");
         return false;
     }
@@ -268,78 +429,45 @@ bool receive_once(uint16_t port,
         }
     }
 
-    const std::string meta_payload(meta.payload.begin(), meta.payload.end());
-    const auto split = meta_payload.find('\n');
-    const auto name = filename_only(split == std::string::npos ? meta_payload : meta_payload.substr(0, split));
-    const auto expected_digest = split == std::string::npos ? std::string{} : meta_payload.substr(split + 1);
-    const auto out_path = unique_output_path(output_dir, name);
+    const auto info = parse_incoming_file(meta, peer);
+    return receive_accepted_session(sock, meta, peer, output_dir, info, log);
+}
 
-    Packet ack;
-    ack.type = PacketType::MetaAck;
-    ack.session = meta.session;
-    ack.seq = meta.seq;
-    ack.total = meta.total;
-    auto ack_bytes = encode_packet(ack);
-    sock.send_bytes(peer.host, peer.port, ack_bytes.data(), ack_bytes.size());
-
-    log_line(log, "Receiving " + name + " from " + peer.host + ":" + std::to_string(peer.port));
-    std::ofstream out(out_path, std::ios::binary);
-    uint64_t hash = 14695981039346656037ull;
-    uint32_t expected_seq = 1;
-    while (expected_seq <= meta.total) {
-        if (!sock.recv_bytes(raw, peer, kMaxDatagram)) {
-            continue;
-        }
-        Packet chunk;
-        if (!decode_packet(raw.data(), raw.size(), chunk) || chunk.session != meta.session || chunk.type != PacketType::Data) {
-            continue;
-        }
-        Packet data_ack;
-        data_ack.type = PacketType::DataAck;
-        data_ack.session = meta.session;
-        data_ack.seq = chunk.seq;
-        data_ack.total = meta.total;
-        auto data_ack_bytes = encode_packet(data_ack);
-        sock.send_bytes(peer.host, peer.port, data_ack_bytes.data(), data_ack_bytes.size());
-        if (chunk.seq != expected_seq) {
-            continue;
-        }
-        out.write(reinterpret_cast<const char*>(chunk.payload.data()), static_cast<std::streamsize>(chunk.payload.size()));
-        for (auto b : chunk.payload) {
-            hash ^= b;
-            hash *= 1099511628211ull;
-        }
-        if (expected_seq % 64 == 0 || expected_seq == meta.total) {
-            log_line(log, "Progress " + std::to_string(expected_seq) + "/" + std::to_string(meta.total));
-        }
-        ++expected_seq;
-    }
-    out.close();
-
-    while (true) {
-        if (!sock.recv_bytes(raw, peer, kMaxDatagram)) {
-            continue;
-        }
-        Packet done;
-        if (!decode_packet(raw.data(), raw.size(), done) || done.session != meta.session || done.type != PacketType::Done) {
-            continue;
-        }
-        Packet done_ack;
-        done_ack.type = PacketType::DoneAck;
-        done_ack.session = meta.session;
-        done_ack.seq = done.seq;
-        done_ack.total = meta.total;
-        auto done_ack_bytes = encode_packet(done_ack);
-        sock.send_bytes(peer.host, peer.port, done_ack_bytes.data(), done_ack_bytes.size());
-        break;
-    }
-
-    const auto actual_digest = hex64(hash);
-    if (!expected_digest.empty() && actual_digest != expected_digest) {
-        log_line(log, "Checksum mismatch. expected=" + expected_digest + " actual=" + actual_digest);
+bool receive_forever(uint16_t port,
+                     const std::string& output_dir,
+                     const TransferOptions& options,
+                     const AcceptFn& accept,
+                     const StopFn& should_stop,
+                     const LogFn& log) {
+    UdpSocket sock;
+    if (!sock.valid() || !sock.bind_port(port) || !sock.set_timeout(std::min(options.timeout_ms, 250))) {
+        log_line(log, "Unable to bind UDP port " + std::to_string(port));
         return false;
     }
-    log_line(log, "Saved to " + out_path + " checksum=" + actual_digest);
+
+    log_line(log, "Listening on UDP port " + std::to_string(port));
+    Endpoint peer;
+    std::vector<uint8_t> raw;
+    while (!should_stop || !should_stop()) {
+        if (!sock.recv_bytes(raw, peer, kMaxDatagram)) {
+            continue;
+        }
+        Packet meta;
+        if (!decode_packet(raw.data(), raw.size(), meta) || meta.type != PacketType::Meta) {
+            continue;
+        }
+        const auto info = parse_incoming_file(meta, peer);
+        log_line(log, "Incoming " + info.filename + " (" + std::to_string(info.file_size) + " bytes) from " + peer.host);
+        send_control(sock, peer, PacketType::MetaWait, meta.session, meta.seq, meta.total);
+        if (accept && !accept(info)) {
+            send_control(sock, peer, PacketType::MetaReject, meta.session, meta.seq, meta.total);
+            log_line(log, "Rejected " + info.filename);
+            continue;
+        }
+        if (!receive_accepted_session(sock, meta, peer, output_dir, info, log)) {
+            log_line(log, "Receive failed for " + info.filename);
+        }
+    }
     return true;
 }
 

@@ -8,6 +8,7 @@
 namespace ttrans {
 
 using LogFn = std::function<void(const std::string&)>;
+using StopFn = std::function<bool()>;
 
 struct TransferOptions {
     std::size_t chunk_size = 1024;
@@ -27,7 +28,21 @@ enum class PacketType : uint8_t {
     DataAck = 4,
     Done = 5,
     DoneAck = 6,
+    MetaReject = 7,
+    MetaWait = 8,
 };
+
+struct IncomingFile {
+    std::string filename;
+    std::string peer_host;
+    uint16_t peer_port = 0;
+    uint32_t session = 0;
+    uint32_t total_chunks = 0;
+    uint64_t file_size = 0;
+    std::string checksum;
+};
+
+using AcceptFn = std::function<bool(const IncomingFile&)>;
 
 struct Packet {
     PacketType type = PacketType::Meta;
@@ -74,6 +89,13 @@ bool receive_once(uint16_t port,
                   const TransferOptions& options,
                   const LogFn& log);
 
-int run_web_gui(uint16_t http_port, const TransferOptions& options);
+bool receive_forever(uint16_t port,
+                     const std::string& output_dir,
+                     const TransferOptions& options,
+                     const AcceptFn& accept,
+                     const StopFn& should_stop,
+                     const LogFn& log);
+
+int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const TransferOptions& options);
 
 } // namespace ttrans

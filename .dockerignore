@@ -1,9 +1,0 @@
-.git
-dist
-build
-docker-data
-downloads
-*.zip
-*.tar.gz
-*.dmg
-*.exe

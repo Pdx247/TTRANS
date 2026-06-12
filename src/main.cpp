@@ -13,7 +13,7 @@ void print_help() {
         << "Usage:\n"
         << "  ttrans send --host <ip> --port <port> --file <path>\n"
         << "  ttrans receive --port <port> --out <dir>\n"
-        << "  ttrans gui [--http-port <port>]\n\n"
+        << "  ttrans gui [--port <port>] [--out <dir>]\n\n"
         << "Options:\n"
         << "  --chunk <bytes>      UDP payload size, default 1024\n"
         << "  --timeout <ms>       ACK timeout, default 700\n"
@@ -97,8 +97,9 @@ int main(int argc, char** argv) {
             return ttrans::receive_once(port, out, options, log) ? 0 : 2;
         }
         if (command == "gui") {
-            const auto http_port = parse_port(value_after(args, "--http-port"), 47880);
-            return ttrans::run_web_gui(http_port, options);
+            const auto port = parse_port(value_after(args, "--port"), 44777);
+            const auto out = value_after(args, "--out", "downloads");
+            return ttrans::run_imgui_gui(port, out, options);
         }
         print_help();
         return 1;

@@ -1,6 +1,5 @@
 build/
 dist/
-docker-data/
 downloads/
 *.o
 *.obj
