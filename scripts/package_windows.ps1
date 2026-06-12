@@ -6,6 +6,7 @@ $pkg = Join-Path $root "dist\TTrans-windows-installer.zip"
 if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
 New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Copy-Item -Force -Path (Join-Path $root "dist\ttrans.exe") -Destination (Join-Path $packageDir "ttrans.exe")
+Copy-Item -Force -Path (Join-Path $root "dist\ttrans-gui.exe") -Destination (Join-Path $packageDir "ttrans-gui.exe")
 $sdl = where.exe SDL2.dll 2>$null | Select-Object -First 1
 if ($sdl) {
     Copy-Item -Force -Path $sdl -Destination (Join-Path $packageDir "SDL2.dll")

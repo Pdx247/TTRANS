@@ -21,4 +21,5 @@ cmake --build $build --config Release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Copy-Item -Force -Path (Join-Path $build "ttrans.exe") -Destination (Join-Path $dist "ttrans.exe")
+Copy-Item -Force -Path (Join-Path $build "ttrans-gui.exe") -Destination (Join-Path $dist "ttrans-gui.exe")
 Write-Host "Built $dist\ttrans.exe"

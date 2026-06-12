@@ -9,6 +9,7 @@ TTrans Windows 安装包
 
 使用:
 - 双击桌面 TTrans 快捷方式会打开原生 Dear ImGui 窗口
+- 快捷方式启动的是无控制台版 ttrans-gui.exe，不会弹出黑色终端
 - 默认 UDP 端口是 44777
 - 接收文件默认保存到程序运行目录下的 downloads 文件夹
 

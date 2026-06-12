@@ -68,10 +68,29 @@ target_include_directories(ttrans PRIVATE include)
 target_link_libraries(ttrans PRIVATE imgui OpenGL::GL)
 
 if(WIN32)
+    set_source_files_properties(assets/ttrans.rc PROPERTIES COMPILE_OPTIONS "-I${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    target_sources(ttrans PRIVATE assets/ttrans.rc)
     target_link_libraries(ttrans PRIVATE ws2_32)
 endif()
 
-install(TARGETS ttrans RUNTIME DESTINATION bin BUNDLE DESTINATION .)
+add_executable(ttrans-gui
+    src/gui_main.cpp
+    src/protocol.cpp
+    src/socket.cpp
+    src/transfer.cpp
+    src/imgui_gui.cpp
+)
+
+target_include_directories(ttrans-gui PRIVATE include)
+target_link_libraries(ttrans-gui PRIVATE imgui OpenGL::GL)
+
+if(WIN32)
+    set_target_properties(ttrans-gui PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_sources(ttrans-gui PRIVATE assets/ttrans.rc)
+    target_link_libraries(ttrans-gui PRIVATE ws2_32 shell32)
+endif()
+
+install(TARGETS ttrans ttrans-gui RUNTIME DESTINATION bin BUNDLE DESTINATION .)
 
 set(CPACK_PACKAGE_NAME "TTrans")
 set(CPACK_PACKAGE_VENDOR "Pdx247")

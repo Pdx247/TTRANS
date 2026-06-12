@@ -25,6 +25,8 @@ https://github.com/Pdx247/TTRANS/releases
 - UDP 分块传输，固定头部协议，分块 ACK 与超时重传
 - CLI：发送和接收文件
 - Dear ImGui 原生 GUI：发送、持续监听接收端口、收到文件时弹窗接受/拒绝、日志、文本预览
+- Windows 桌面快捷方式启动无控制台的 `ttrans-gui.exe`
+- Windows 包内置程序图标和运行所需 DLL
 - 发送和接收都保留原始文件名
 - 跨平台源码：Windows、Linux、macOS
 - 自动发布包：Windows installer zip、Linux ELF tarball、macOS dmg
@@ -34,7 +36,7 @@ https://github.com/Pdx247/TTRANS/releases
 启动 GUI:
 
 ```sh
-ttrans gui --port 44777 --out downloads
+ttrans-gui --port 44777 --out downloads
 ```
 
 GUI 一打开就会持续监听 `44777/udp`。收到文件时会弹出确认窗口，点击 `Accept` 才会接收，点击 `Reject` 会通知发送方取消。

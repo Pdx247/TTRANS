@@ -8,6 +8,10 @@
 #include <SDL.h>
 #include <SDL_opengl.h>
 
+#ifndef SDL_HINT_WINDOWS_DPI_AWARENESS
+#define SDL_HINT_WINDOWS_DPI_AWARENESS "SDL_WINDOWS_DPI_AWARENESS"
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -15,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -64,6 +69,23 @@ struct GuiState {
     std::thread listener;
 };
 
+ImU32 u32(int r, int g, int b, int a = 255) {
+    return IM_COL32(r, g, b, a);
+}
+
+std::string human_size(uint64_t bytes) {
+    const char* units[] = {"B", "KB", "MB", "GB"};
+    double value = static_cast<double>(bytes);
+    int unit = 0;
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        ++unit;
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(unit == 0 ? 0 : 1) << value << ' ' << units[unit];
+    return out.str();
+}
+
 std::string file_name_only(const std::string& path) {
     const auto slash = path.find_last_of("/\\");
     return slash == std::string::npos ? path : path.substr(slash + 1);
@@ -108,6 +130,48 @@ std::string text_preview(const std::string& path) {
         }
     }
     return data;
+}
+
+void section_label(const char* text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.10f, 0.16f, 0.25f, 1.0f));
+    ImGui::TextUnformatted(text);
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    const float x = ImGui::GetCursorPosX();
+    const float y = ImGui::GetCursorScreenPos().y + ImGui::GetTextLineHeight() * 0.55f;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddLine(ImVec2(ImGui::GetWindowPos().x + x + 8.0f, y),
+                  ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - 18.0f, y),
+                  u32(219, 226, 236), 1.0f);
+    ImGui::NewLine();
+}
+
+void status_badge(const char* text, bool active) {
+    ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(0.85f, 0.97f, 0.91f, 1.0f) : ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? ImVec4(0.78f, 0.94f, 0.86f, 1.0f) : ImVec4(0.91f, 0.93f, 0.96f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? ImVec4(0.72f, 0.90f, 0.81f, 1.0f) : ImVec4(0.88f, 0.91f, 0.95f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, active ? ImVec4(0.04f, 0.42f, 0.24f, 1.0f) : ImVec4(0.37f, 0.43f, 0.52f, 1.0f));
+    ImGui::Button(text, ImVec2(94, 0));
+    ImGui::PopStyleColor(4);
+}
+
+bool primary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.05f, 0.34f, 0.74f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.06f, 0.41f, 0.86f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.04f, 0.27f, 0.62f, 1.0f));
+    const bool clicked = ImGui::Button(text, size);
+    ImGui::PopStyleColor(3);
+    return clicked;
+}
+
+bool secondary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.94f, 0.96f, 0.99f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.89f, 0.93f, 0.99f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.84f, 0.89f, 0.97f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.11f, 0.17f, 0.26f, 1.0f));
+    const bool clicked = ImGui::Button(text, size);
+    ImGui::PopStyleColor(4);
+    return clicked;
 }
 
 void copy_to_buffer(char* buffer, std::size_t size, const std::string& value) {
@@ -176,19 +240,17 @@ void stop_listener(GuiState& state) {
 }
 
 void draw_send_panel(GuiState& state, const TransferOptions& options) {
-    ImGui::TextUnformatted("Send");
-    ImGui::Separator();
+    section_label("Send");
     ImGui::InputText("Target IP", state.target_host, sizeof(state.target_host));
     ImGui::InputInt("UDP Port", &state.udp_port);
     state.udp_port = std::max(1, std::min(65535, state.udp_port));
     ImGui::InputText("File path", state.file_path, sizeof(state.file_path));
-    ImGui::TextDisabled("Tip: drag a file onto this window.");
 
     const bool can_send = state.file_path[0] != '\0' && state.target_host[0] != '\0' && !state.sending.load();
     if (!can_send) {
         ImGui::BeginDisabled();
     }
-    if (ImGui::Button("Send File", ImVec2(-1, 0))) {
+    if (primary_button(state.sending.load() ? "Sending" : "Send File", ImVec2(-1, 36))) {
         const std::string host = state.target_host;
         const std::string file = state.file_path;
         const uint16_t port = static_cast<uint16_t>(state.udp_port);
@@ -205,33 +267,35 @@ void draw_send_panel(GuiState& state, const TransferOptions& options) {
         ImGui::EndDisabled();
     }
 
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Preview");
-    ImGui::BeginChild("preview", ImVec2(0, 160), true);
+    ImGui::Dummy(ImVec2(1, 8));
+    section_label("Preview");
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.98f, 0.99f, 1.0f, 1.0f));
+    ImGui::BeginChild("preview", ImVec2(0, 176), true);
     if (state.file_path[0]) {
         const std::string path = state.file_path;
-        ImGui::TextWrapped("Name: %s", file_name_only(path).c_str());
-        ImGui::Text("Size: %llu bytes", static_cast<unsigned long long>(file_size_or_zero(path)));
+        ImGui::TextWrapped("%s", file_name_only(path).c_str());
+        ImGui::TextDisabled("%s", human_size(file_size_or_zero(path)).c_str());
         const auto preview = text_preview(path);
         if (!preview.empty()) {
             ImGui::Separator();
             ImGui::TextUnformatted(preview.c_str());
         }
     } else {
-        ImGui::TextDisabled("No file selected.");
+        ImGui::TextDisabled("Drop a file here or paste a path.");
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
 void draw_receive_panel(GuiState& state, const TransferOptions& options) {
-    ImGui::TextUnformatted("Receive");
-    ImGui::Separator();
+    section_label("Receive");
     ImGui::InputText("Output dir", state.output_dir, sizeof(state.output_dir));
-    ImGui::Text("Status: %s", state.listening.load() ? "listening" : "stopped");
-    if (ImGui::Button("Restart Listener", ImVec2(-1, 0))) {
+    ImGui::TextUnformatted("Listener");
+    ImGui::SameLine();
+    status_badge(state.listening.load() ? "ACTIVE" : "STOPPED", state.listening.load());
+    if (secondary_button("Restart Listener", ImVec2(-1, 34))) {
         start_listener(state, options);
     }
-    ImGui::TextWrapped("The app keeps listening while this window is open.");
 
     IncomingFile pending;
     bool has_pending = false;
@@ -246,13 +310,12 @@ void draw_receive_panel(GuiState& state, const TransferOptions& options) {
         ImGui::OpenPopup("Incoming File");
     }
     if (ImGui::BeginPopupModal("Incoming File", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("Accept this file?");
-        ImGui::Separator();
-        ImGui::Text("Name: %s", pending.filename.c_str());
-        ImGui::Text("From: %s:%u", pending.peer_host.c_str(), pending.peer_port);
-        ImGui::Text("Size: %llu bytes", static_cast<unsigned long long>(pending.file_size));
-        ImGui::Text("Checksum: %s", pending.checksum.c_str());
-        if (ImGui::Button("Accept", ImVec2(120, 0))) {
+        section_label("Incoming file");
+        ImGui::TextWrapped("%s", pending.filename.c_str());
+        ImGui::TextDisabled("%s from %s:%u", human_size(pending.file_size).c_str(), pending.peer_host.c_str(), pending.peer_port);
+        ImGui::TextDisabled("Checksum %s", pending.checksum.c_str());
+        ImGui::Dummy(ImVec2(1, 8));
+        if (primary_button("Accept", ImVec2(128, 34))) {
             {
                 std::lock_guard<std::mutex> lock(state.prompt.mutex);
                 state.prompt.accepted = true;
@@ -262,7 +325,7 @@ void draw_receive_panel(GuiState& state, const TransferOptions& options) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Reject", ImVec2(120, 0))) {
+        if (secondary_button("Reject", ImVec2(128, 34))) {
             {
                 std::lock_guard<std::mutex> lock(state.prompt.mutex);
                 state.prompt.accepted = false;
@@ -276,8 +339,9 @@ void draw_receive_panel(GuiState& state, const TransferOptions& options) {
 }
 
 void draw_log_panel(GuiState& state) {
-    ImGui::TextUnformatted("Log");
-    ImGui::Separator();
+    section_label("Activity");
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.06f, 0.09f, 0.14f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.82f, 0.88f, 0.96f, 1.0f));
     ImGui::BeginChild("log", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
     const auto lines = state.log.snapshot();
     for (const auto& line : lines) {
@@ -287,22 +351,86 @@ void draw_log_panel(GuiState& state) {
         ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor(2);
 }
 
 void apply_style() {
     ImGui::StyleColorsLight();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 4.0f;
-    style.FrameRounding = 3.0f;
-    style.GrabRounding = 3.0f;
-    style.WindowPadding = ImVec2(12, 10);
-    style.FramePadding = ImVec2(8, 5);
-    style.ItemSpacing = ImVec2(8, 7);
+    style.WindowRounding = 0.0f;
+    style.ChildRounding = 8.0f;
+    style.FrameRounding = 5.0f;
+    style.PopupRounding = 8.0f;
+    style.GrabRounding = 5.0f;
+    style.WindowPadding = ImVec2(14, 12);
+    style.FramePadding = ImVec2(10, 7);
+    style.ItemSpacing = ImVec2(10, 9);
+    style.ItemInnerSpacing = ImVec2(8, 6);
+    style.ScrollbarSize = 12.0f;
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text] = ImVec4(0.10f, 0.15f, 0.23f, 1.0f);
+    colors[ImGuiCol_TextDisabled] = ImVec4(0.45f, 0.51f, 0.60f, 1.0f);
+    colors[ImGuiCol_WindowBg] = ImVec4(0.95f, 0.97f, 0.99f, 1.0f);
+    colors[ImGuiCol_ChildBg] = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
+    colors[ImGuiCol_Border] = ImVec4(0.84f, 0.88f, 0.93f, 1.0f);
+    colors[ImGuiCol_FrameBg] = ImVec4(0.97f, 0.98f, 1.00f, 1.0f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.92f, 0.95f, 0.99f, 1.0f);
+    colors[ImGuiCol_FrameBgActive] = ImVec4(0.88f, 0.92f, 0.98f, 1.0f);
+    colors[ImGuiCol_Header] = ImVec4(0.90f, 0.94f, 0.99f, 1.0f);
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.84f, 0.90f, 0.98f, 1.0f);
+    colors[ImGuiCol_HeaderActive] = ImVec4(0.77f, 0.86f, 0.97f, 1.0f);
+    colors[ImGuiCol_CheckMark] = ImVec4(0.05f, 0.34f, 0.74f, 1.0f);
+}
+
+void load_crisp_font(float scale) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+    const float size = 15.5f * scale;
+#ifdef _WIN32
+    const char* font_path = "C:/Windows/Fonts/segoeui.ttf";
+#elif __APPLE__
+    const char* font_path = "/System/Library/Fonts/SFNS.ttf";
+#else
+    const char* font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+#endif
+    ImFontConfig config;
+    config.OversampleH = 3;
+    config.OversampleV = 2;
+    config.PixelSnapH = true;
+    if (!io.Fonts->AddFontFromFileTTF(font_path, size, &config)) {
+        io.Fonts->AddFontDefault();
+    }
+}
+
+float dpi_scale_for_window(SDL_Window* window) {
+    float ddpi = 96.0f;
+    const int display = SDL_GetWindowDisplayIndex(window);
+    if (display >= 0) {
+        SDL_GetDisplayDPI(display, &ddpi, nullptr, nullptr);
+    }
+    if (ddpi <= 0.0f) {
+        ddpi = 96.0f;
+    }
+    return std::max(1.0f, std::min(1.75f, ddpi / 96.0f));
+}
+
+void draw_header(GuiState& state) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 pos = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + 58.0f), u32(20, 45, 75), 8.0f);
+    draw->AddCircleFilled(ImVec2(pos.x + 28.0f, pos.y + 29.0f), 13.0f, u32(56, 210, 219));
+    draw->AddText(ImVec2(pos.x + 52.0f, pos.y + 12.0f), u32(245, 248, 252), "TTrans");
+    draw->AddText(ImVec2(pos.x + 52.0f, pos.y + 33.0f), u32(164, 183, 205), "LAN file transfer");
+    ImGui::SetCursorScreenPos(ImVec2(pos.x + width - 116.0f, pos.y + 17.0f));
+    status_badge(state.listening.load() ? "LISTENING" : "STOPPED", state.listening.load());
+    ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y + 70.0f));
 }
 
 } // namespace
 
 int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const TransferOptions& options) {
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -329,8 +457,8 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
     SDL_Window* window = SDL_CreateWindow("TTrans",
                                           SDL_WINDOWPOS_CENTERED,
                                           SDL_WINDOWPOS_CENTERED,
-                                          780,
-                                          520,
+                                          980,
+                                          620,
                                           SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
@@ -347,6 +475,9 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     apply_style();
+    const float dpi_scale = dpi_scale_for_window(window);
+    load_crisp_font(dpi_scale);
+    ImGui::GetStyle().ScaleAllSizes(dpi_scale);
 
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
@@ -384,18 +515,34 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
                      ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoSavedSettings);
 
-        ImGui::Columns(2, "main_columns", true);
+        draw_header(state);
+
+        const float full_width = ImGui::GetContentRegionAvail().x;
+        const float full_height = ImGui::GetContentRegionAvail().y;
+        const float gap = 12.0f * dpi_scale;
+        const float left_width = std::max(300.0f * dpi_scale, full_width * 0.34f);
+        const float right_width = std::max(280.0f * dpi_scale, full_width * 0.30f);
+        const float mid_width = std::max(240.0f * dpi_scale, full_width - left_width - right_width - gap * 2.0f);
+
+        ImGui::BeginChild("send_panel", ImVec2(left_width, full_height), true);
         draw_send_panel(state, options);
-        ImGui::NextColumn();
+        ImGui::EndChild();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginChild("receive_panel", ImVec2(mid_width, full_height), true);
         draw_receive_panel(state, options);
-        ImGui::Spacing();
+        ImGui::EndChild();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginChild("activity_panel", ImVec2(0, full_height), true);
         draw_log_panel(state);
-        ImGui::Columns(1);
+        ImGui::EndChild();
         ImGui::End();
 
         ImGui::Render();
-        glViewport(0, 0, static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y));
-        glClearColor(0.94f, 0.93f, 0.89f, 1.0f);
+        int display_w = 0;
+        int display_h = 0;
+        SDL_GL_GetDrawableSize(window, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(0.95f, 0.97f, 0.99f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
