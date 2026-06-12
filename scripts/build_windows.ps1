@@ -8,8 +8,9 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     throw "CMake is required to build TTrans with Dear ImGui. Download the GitHub Release package if this machine is only running TTrans."
 }
 
-$mingw = "C:\msys64\mingw64"
-if (Test-Path $mingw) {
+$gpp = Get-Command g++.exe -ErrorAction SilentlyContinue
+if ($gpp) {
+    $mingw = Split-Path -Parent (Split-Path -Parent $gpp.Source)
     $env:Path = "$mingw\bin;$env:Path"
     $env:CMAKE_PREFIX_PATH = $mingw
 }

@@ -24,10 +24,8 @@ jobs:
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-SDL2
       - name: Build and package
-        shell: pwsh
-        run: |
-          $env:Path = "C:\msys64\mingw64\bin;$env:Path"
-          .\scripts\package_windows.ps1
+        shell: msys2 {0}
+        run: sh scripts/package_windows_msys.sh
       - uses: actions/upload-artifact@v5
         with:
           name: TTrans-windows-installer
