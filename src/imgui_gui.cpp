@@ -17,6 +17,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <commdlg.h>
+#include <shellapi.h>
+#include <shlobj.h>
 #endif
 
 #ifndef SDL_HINT_WINDOWS_DPI_AWARENESS
@@ -72,6 +74,20 @@ struct ChatMessage {
     bool outgoing = false;
 };
 
+struct ReceiveRecord {
+    IncomingFile file;
+    std::string output_dir;
+    std::string saved_path;
+    std::string status;
+    float progress = 0.0f;
+    bool pending = false;
+    bool accepted = false;
+    bool complete = false;
+    bool failed = false;
+    uint64_t created_ms = 0;
+    uint64_t updated_ms = 0;
+};
+
 struct SharedLog {
     std::mutex mutex;
     std::vector<std::string> lines;
@@ -93,8 +109,8 @@ struct SharedLog {
 struct ReceivePrompt {
     std::mutex mutex;
     std::condition_variable cv;
-    IncomingFile file;
-    bool active = false;
+    std::vector<ReceiveRecord> records;
+    uint32_t waiting_session = 0;
     bool decided = false;
     bool accepted = false;
 };
@@ -496,6 +512,19 @@ std::string wide_to_utf8(const wchar_t* text) {
     return result;
 }
 
+std::wstring utf8_to_wide(const std::string& text) {
+    if (text.empty()) {
+        return {};
+    }
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    if (needed <= 1) {
+        return {};
+    }
+    std::wstring result(static_cast<std::size_t>(needed - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &result[0], needed);
+    return result;
+}
+
 std::vector<std::string> open_files_dialog() {
     std::vector<wchar_t> selected(65536, L'\0');
     OPENFILENAMEW ofn {};
@@ -526,6 +555,20 @@ std::vector<std::string> open_files_dialog() {
         }
     }
     return paths;
+}
+
+std::string choose_folder_dialog() {
+    BROWSEINFOW browse {};
+    browse.lpszTitle = L"Output";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    PIDLIST_ABSOLUTE id = SHBrowseForFolderW(&browse);
+    if (!id) {
+        return {};
+    }
+    wchar_t path[MAX_PATH] {};
+    const BOOL ok = SHGetPathFromIDListW(id, path);
+    CoTaskMemFree(id);
+    return ok ? wide_to_utf8(path) : std::string {};
 }
 #else
 std::string trim_line(std::string value) {
@@ -578,7 +621,60 @@ std::vector<std::string> open_files_dialog() {
     return paths;
 #endif
 }
+
+std::string choose_folder_dialog() {
+#ifdef __APPLE__
+    return read_command_first_line("osascript -e 'POSIX path of (choose folder)' 2>/dev/null");
+#else
+    return read_command_first_line(
+        "if command -v zenity >/dev/null 2>&1; then "
+        "zenity --file-selection --directory 2>/dev/null; "
+        "elif command -v kdialog >/dev/null 2>&1; then "
+        "kdialog --getexistingdirectory . 2>/dev/null; "
+        "else printf ''; fi");
 #endif
+}
+#endif
+
+std::string parent_dir(const std::string& path) {
+    const auto slash = path.find_last_of("/\\");
+    if (slash == std::string::npos) {
+        return {};
+    }
+    return path.substr(0, slash);
+}
+
+std::string file_url_from_path(const std::string& path) {
+    std::ostringstream out;
+    out << "file://";
+    for (char ch : path) {
+        if (ch == '\\') {
+            out << '/';
+        } else if (ch == ' ') {
+            out << "%20";
+        } else {
+            out << ch;
+        }
+    }
+    return out.str();
+}
+
+void open_folder_path(const std::string& path) {
+    if (path.empty()) {
+        return;
+    }
+#ifdef _WIN32
+    const auto wide = utf8_to_wide(path);
+    if (!wide.empty()) {
+        ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+#else
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    const auto url = file_url_from_path(path);
+    SDL_OpenURL(url.c_str());
+#endif
+#endif
+}
 
 bool looks_textual(const std::string& path) {
     const auto dot = path.find_last_of('.');
@@ -802,6 +898,99 @@ void select_peer_ip(GuiState& state, const std::string& ip) {
             return;
         }
     }
+}
+
+void push_receive_record(GuiState& state, const IncomingFile& file, const std::string& output_dir) {
+    std::lock_guard<std::mutex> lock(state.prompt.mutex);
+    if (state.prompt.records.size() > 60) {
+        state.prompt.records.erase(state.prompt.records.begin(), state.prompt.records.begin() + 20);
+    }
+    ReceiveRecord record;
+    record.file = file;
+    record.output_dir = output_dir.empty() ? "downloads" : output_dir;
+    record.status = "Pending";
+    record.pending = true;
+    record.created_ms = now_ms();
+    record.updated_ms = record.created_ms;
+    state.prompt.records.push_back(record);
+    state.prompt.waiting_session = file.session;
+    state.prompt.decided = false;
+    state.prompt.accepted = false;
+}
+
+ReceiveRecord* find_receive_record(std::vector<ReceiveRecord>& records, uint32_t session) {
+    for (auto& record : records) {
+        if (record.file.session == session) {
+            return &record;
+        }
+    }
+    return nullptr;
+}
+
+ReceiveRecord* current_receiving_record(std::vector<ReceiveRecord>& records) {
+    for (auto it = records.rbegin(); it != records.rend(); ++it) {
+        if (it->accepted && !it->complete) {
+            return &(*it);
+        }
+    }
+    return nullptr;
+}
+
+void decide_receive_record(GuiState& state, uint32_t session, bool accepted) {
+    {
+        std::lock_guard<std::mutex> lock(state.prompt.mutex);
+        if (auto* record = find_receive_record(state.prompt.records, session)) {
+            record->pending = false;
+            record->accepted = accepted;
+            record->complete = !accepted;
+            record->failed = !accepted;
+            record->status = accepted ? "Queued" : "Rejected";
+            record->updated_ms = now_ms();
+        }
+        if (state.prompt.waiting_session == session) {
+            state.prompt.accepted = accepted;
+            state.prompt.decided = true;
+        }
+    }
+    state.prompt.cv.notify_all();
+}
+
+void update_receive_progress(GuiState& state, int done, int total) {
+    std::lock_guard<std::mutex> lock(state.prompt.mutex);
+    if (auto* record = current_receiving_record(state.prompt.records)) {
+        if (total > 0) {
+            record->progress = std::max(0.0f, std::min(1.0f, static_cast<float>(done) / static_cast<float>(total)));
+        }
+        record->status = "Receiving";
+        record->updated_ms = now_ms();
+    }
+}
+
+void mark_current_receive_saved(GuiState& state, const std::string& saved_path) {
+    std::lock_guard<std::mutex> lock(state.prompt.mutex);
+    if (auto* record = current_receiving_record(state.prompt.records)) {
+        record->saved_path = saved_path;
+        record->progress = 1.0f;
+        record->status = "Saved";
+        record->complete = true;
+        record->failed = false;
+        record->updated_ms = now_ms();
+    }
+}
+
+void mark_current_receive_failed(GuiState& state, const std::string& status) {
+    std::lock_guard<std::mutex> lock(state.prompt.mutex);
+    if (auto* record = current_receiving_record(state.prompt.records)) {
+        record->status = status.empty() ? "Failed" : status;
+        record->complete = true;
+        record->failed = true;
+        record->updated_ms = now_ms();
+    }
+}
+
+std::vector<ReceiveRecord> receive_snapshot(GuiState& state) {
+    std::lock_guard<std::mutex> lock(state.prompt.mutex);
+    return state.prompt.records;
 }
 
 void refresh_local_networks(GuiState& state) {
@@ -1085,6 +1274,33 @@ void send_selected_files(GuiState& state, const TransferOptions& options) {
     }).detach();
 }
 
+void update_receive_from_log(GuiState& state, const std::string& line) {
+    const std::string prefix = "Progress ";
+    if (line.find(prefix) == 0) {
+        const auto slash = line.find('/');
+        if (slash != std::string::npos) {
+            const int done = std::atoi(line.substr(prefix.size(), slash - prefix.size()).c_str());
+            const int total = std::atoi(line.substr(slash + 1).c_str());
+            update_receive_progress(state, done, total);
+        }
+        return;
+    }
+
+    const std::string saved = "Saved to ";
+    if (line.find(saved) == 0) {
+        const auto checksum = line.find(" checksum=");
+        const auto end = checksum == std::string::npos ? line.size() : checksum;
+        mark_current_receive_saved(state, line.substr(saved.size(), end - saved.size()));
+        return;
+    }
+
+    if (line.find("Unable ") == 0 ||
+        line.find("Checksum mismatch") == 0 ||
+        line.find("Receive failed") == 0) {
+        mark_current_receive_failed(state, "Failed");
+    }
+}
+
 void start_listener(GuiState& state, const TransferOptions& options) {
     if (state.listener.joinable()) {
         state.stop_listener = true;
@@ -1104,19 +1320,24 @@ void start_listener(GuiState& state, const TransferOptions& options) {
     state.log.add("Listening on UDP port " + std::to_string(port));
 
     state.listener = std::thread([&state, port, output_dir, options] {
-        auto accept = [&state](const IncomingFile& file) {
+        auto accept = [&state, output_dir](const IncomingFile& file) {
+            const std::string current_output = output_dir.empty() ? "downloads" : output_dir;
+            push_receive_record(state, file, current_output);
             std::unique_lock<std::mutex> lock(state.prompt.mutex);
-            state.prompt.file = file;
-            state.prompt.active = true;
-            state.prompt.decided = false;
-            state.prompt.accepted = false;
             state.prompt.cv.wait(lock, [&state] {
                 return state.prompt.decided || state.stop_listener.load();
             });
             const bool accepted = state.prompt.accepted && !state.stop_listener.load();
-            state.prompt.active = false;
-            state.prompt.decided = false;
-            state.prompt.accepted = false;
+            if (auto* record = find_receive_record(state.prompt.records, file.session)) {
+                record->pending = false;
+                record->accepted = accepted;
+                record->complete = !accepted;
+                record->failed = !accepted;
+                record->progress = accepted ? 0.0f : record->progress;
+                record->status = accepted ? "Receiving" : "Rejected";
+                record->updated_ms = now_ms();
+            }
+            state.prompt.waiting_session = 0;
             return accepted;
         };
         auto stop = [&state] {
@@ -1124,6 +1345,7 @@ void start_listener(GuiState& state, const TransferOptions& options) {
         };
         auto log = [&state](const std::string& line) {
             state.log.add(line);
+            update_receive_from_log(state, line);
         };
         auto peer_event = [&state](const Endpoint& peer, const Packet& packet) {
             upsert_peer(state, peer.host, "TTrans");
@@ -1169,6 +1391,7 @@ void draw_left_panel(GuiState& state) {
         state.selected_peer = std::max(0, peer_count - 1);
     }
     const std::string current = peers.empty() ? "127.0.0.1" : peers[static_cast<std::size_t>(state.selected_peer)].ip;
+    ImGui::SetNextItemWidth(-1.0f);
     if (ImGui::BeginCombo("##peer_combo", current.c_str())) {
         for (int i = 0; i < peer_count; ++i) {
             const bool selected = state.selected_peer == i;
@@ -1243,48 +1466,6 @@ void draw_left_panel(GuiState& state) {
     ImGui::TextWrapped("%s", speed_status(state).c_str());
 }
 
-void draw_incoming_popup(GuiState& state) {
-    IncomingFile pending;
-    bool has_pending = false;
-    {
-        std::lock_guard<std::mutex> lock(state.prompt.mutex);
-        if (state.prompt.active && !state.prompt.decided) {
-            pending = state.prompt.file;
-            has_pending = true;
-        }
-    }
-    if (has_pending) {
-        ImGui::OpenPopup("Incoming File");
-    }
-    if (ImGui::BeginPopupModal("Incoming File", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        section_label("File");
-        ImGui::TextWrapped("%s", pending.filename.c_str());
-        ImGui::TextDisabled("%s  %s:%u", human_size(pending.file_size).c_str(), pending.peer_host.c_str(), pending.peer_port);
-        ImGui::TextDisabled("%s", pending.checksum.c_str());
-        ImGui::Dummy(ImVec2(1, 8));
-        if (primary_button("Accept", ImVec2(128, 34))) {
-            {
-                std::lock_guard<std::mutex> lock(state.prompt.mutex);
-                state.prompt.accepted = true;
-                state.prompt.decided = true;
-            }
-            state.prompt.cv.notify_all();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (secondary_button("Reject", ImVec2(128, 34))) {
-            {
-                std::lock_guard<std::mutex> lock(state.prompt.mutex);
-                state.prompt.accepted = false;
-                state.prompt.decided = true;
-            }
-            state.prompt.cv.notify_all();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-}
-
 void draw_file_row(GuiState& state, std::size_t index) {
     const auto path = state.files[index].path;
     const auto name = file_name_only(path);
@@ -1317,6 +1498,105 @@ void draw_file_row(GuiState& state, std::size_t index) {
     ImGui::PopID();
 }
 
+void apply_output_dir(GuiState& state, const TransferOptions& options) {
+    if (!state.output_dir[0]) {
+        copy_to_buffer(state.output_dir, sizeof(state.output_dir), "downloads");
+    }
+    start_listener(state, options);
+}
+
+void draw_output_controls(GuiState& state, const TransferOptions& options) {
+    ImGui::PushItemWidth(-166.0f);
+    const bool enter = ImGui::InputTextWithHint("##output_dir",
+                                                "downloads",
+                                                state.output_dir,
+                                                sizeof(state.output_dir),
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    if (secondary_button("...", ImVec2(44, 32))) {
+        const auto folder = choose_folder_dialog();
+        if (!folder.empty()) {
+            copy_to_buffer(state.output_dir, sizeof(state.output_dir), folder);
+            apply_output_dir(state, options);
+        }
+    }
+    ImGui::SameLine();
+    if (secondary_button("Apply", ImVec2(86, 32)) || enter) {
+        apply_output_dir(state, options);
+    }
+}
+
+std::string receive_folder_for_record(const ReceiveRecord& record) {
+    const auto from_saved = parent_dir(record.saved_path);
+    if (!from_saved.empty()) {
+        return from_saved;
+    }
+    return record.output_dir.empty() ? "downloads" : record.output_dir;
+}
+
+void draw_receive_buffer(GuiState& state) {
+    panel_title(FeatherIcon::Archive, "Receive");
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme_vec4(250, 252, 255, 15, 23, 42));
+    ImGui::BeginChild("receive_buffer", ImVec2(0, 142), true);
+    const auto records = receive_snapshot(state);
+    ImGuiTableFlags flags = ImGuiTableFlags_RowBg |
+                            ImGuiTableFlags_BordersInnerH |
+                            ImGuiTableFlags_SizingStretchProp |
+                            ImGuiTableFlags_NoPadOuterX;
+    if (ImGui::BeginTable("receive_rows", 4, flags)) {
+        ImGui::TableSetupColumn("file", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("from", ImGuiTableColumnFlags_WidthFixed, 96.0f);
+        ImGui::TableSetupColumn("progress", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+        ImGui::TableSetupColumn("action", ImGuiTableColumnFlags_WidthFixed, 166.0f);
+        if (records.empty()) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextDisabled("Empty");
+        } else {
+            for (std::size_t offset = 0; offset < records.size(); ++offset) {
+                const std::size_t index = records.size() - 1 - offset;
+                const auto& record = records[index];
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::PushTextWrapPos(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x);
+                ImGui::TextUnformatted(record.file.filename.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::TextDisabled("%s  %s", human_size(record.file.file_size).c_str(), record.status.c_str());
+
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextWrapped("%s", record.file.peer_host.c_str());
+
+                ImGui::TableSetColumnIndex(2);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 4.0f);
+                ImGui::ProgressBar(record.progress, ImVec2(-1, 18), "");
+
+                ImGui::TableSetColumnIndex(3);
+                const float action_x = ImGui::GetCursorPosX();
+                ImGui::PushID(static_cast<int>(record.file.session));
+                if (record.pending) {
+                    if (primary_button("Accept", ImVec2(64, 28))) {
+                        decide_receive_record(state, record.file.session, true);
+                    }
+                    ImGui::SameLine();
+                    if (secondary_button("Reject", ImVec2(62, 28))) {
+                        decide_receive_record(state, record.file.session, false);
+                    }
+                    ImGui::SetCursorPosX(action_x);
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
+                }
+                if (secondary_button("Open", ImVec2(154, 28))) {
+                    open_folder_path(receive_folder_for_record(record));
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
 void draw_center_panel(GuiState& state, const TransferOptions& options) {
     panel_title(FeatherIcon::FileText, "Files");
     if (secondary_button("Add", ImVec2(82, 34))) {
@@ -1330,10 +1610,11 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
     }
 
     ImGui::Dummy(ImVec2(1, 8));
+    const float queue_height = std::max(168.0f, ImGui::GetContentRegionAvail().y - 274.0f);
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
                           state.files.empty() ? theme_vec4(238, 247, 255, 15, 23, 42)
                                               : theme_vec4(255, 255, 255, 11, 18, 32));
-    ImGui::BeginChild("file_queue", ImVec2(0, 328), true);
+    ImGui::BeginChild("file_queue", ImVec2(0, queue_height), true);
     const ImVec2 pos = ImGui::GetWindowPos();
     const ImVec2 max = ImVec2(pos.x + ImGui::GetWindowWidth(), pos.y + ImGui::GetWindowHeight());
     ImGui::GetWindowDrawList()->AddRect(pos,
@@ -1381,6 +1662,11 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
     if (!can_send) {
         ImGui::EndDisabled();
     }
+
+    ImGui::Dummy(ImVec2(1, 8));
+    draw_output_controls(state, options);
+    ImGui::Dummy(ImVec2(1, 8));
+    draw_receive_buffer(state);
 }
 
 void draw_right_panel(GuiState& state) {
@@ -1587,15 +1873,15 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
     SDL_Window* window = SDL_CreateWindow("TTrans",
                                           SDL_WINDOWPOS_CENTERED,
                                           SDL_WINDOWPOS_CENTERED,
-                                          1040,
-                                          640,
+                                          1120,
+                                          680,
                                           SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
         return 2;
     }
-    SDL_SetWindowMinimumSize(window, 920, 560);
+    SDL_SetWindowMinimumSize(window, 1040, 620);
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
@@ -1649,20 +1935,18 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
                      ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoSavedSettings);
 
-        draw_incoming_popup(state);
-
         const float full_width = ImGui::GetContentRegionAvail().x;
         const float full_height = ImGui::GetContentRegionAvail().y;
         const float gap = 12.0f * dpi_scale;
         const float panel_width = std::max(0.0f, full_width - gap * 2.0f);
-        float left_width = std::min(240.0f, panel_width * 0.23f);
-        float right_width = std::min(290.0f, panel_width * 0.27f);
+        float left_width = std::min(300.0f, panel_width * 0.29f);
+        float right_width = std::min(270.0f, panel_width * 0.25f);
         float mid_width = panel_width - left_width - right_width;
-        const float desired_mid = std::min(520.0f, panel_width * 0.52f);
+        const float desired_mid = std::min(520.0f, panel_width * 0.48f);
         if (mid_width < desired_mid) {
             float shortage = desired_mid - mid_width;
-            const float right_min = std::min(240.0f, panel_width * 0.27f);
-            const float left_min = std::min(200.0f, panel_width * 0.22f);
+            const float right_min = std::min(236.0f, panel_width * 0.24f);
+            const float left_min = std::min(270.0f, panel_width * 0.28f);
             const float right_cut = std::min(shortage * 0.65f, std::max(0.0f, right_width - right_min));
             right_width -= right_cut;
             shortage -= right_cut;
