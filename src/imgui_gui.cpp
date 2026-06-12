@@ -4,15 +4,27 @@
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl2.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <SDL_opengl.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <commdlg.h>
+#endif
 
 #ifndef SDL_HINT_WINDOWS_DPI_AWARENESS
 #define SDL_HINT_WINDOWS_DPI_AWARENESS "SDL_WINDOWS_DPI_AWARENESS"
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <condition_variable>
@@ -23,6 +35,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <thread>
 #include <vector>
 
@@ -99,6 +112,72 @@ uint64_t file_size_or_zero(const std::string& path) {
     in.seekg(0, std::ios::end);
     return static_cast<uint64_t>(in.tellg());
 }
+
+bool regular_file_for_ui(const std::string& path) {
+    struct stat st {};
+    return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFREG) != 0;
+}
+
+#ifdef _WIN32
+std::string wide_to_utf8(const wchar_t* text) {
+    if (!text || !text[0]) {
+        return {};
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (needed <= 1) {
+        return {};
+    }
+    std::string result(static_cast<std::size_t>(needed - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, &result[0], needed, nullptr, nullptr);
+    return result;
+}
+
+std::string open_file_dialog() {
+    wchar_t selected[MAX_PATH * 8] = {};
+    OPENFILENAMEW ofn {};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.lpstrFile = selected;
+    ofn.nMaxFile = static_cast<DWORD>(sizeof(selected) / sizeof(selected[0]));
+    ofn.lpstrFilter = L"All files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    return GetOpenFileNameW(&ofn) ? wide_to_utf8(selected) : std::string {};
+}
+#else
+std::string trim_line(std::string value) {
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string read_command_first_line(const char* command) {
+    FILE* pipe = popen(command, "r");
+    if (!pipe) {
+        return {};
+    }
+    std::array<char, 4096> buffer {};
+    std::string result;
+    if (std::fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
+        result = buffer.data();
+    }
+    pclose(pipe);
+    return trim_line(result);
+}
+
+std::string open_file_dialog() {
+#ifdef __APPLE__
+    return read_command_first_line("osascript -e 'POSIX path of (choose file)' 2>/dev/null");
+#else
+    return read_command_first_line(
+        "if command -v zenity >/dev/null 2>&1; then "
+        "zenity --file-selection 2>/dev/null; "
+        "elif command -v kdialog >/dev/null 2>&1; then "
+        "kdialog --getopenfilename . 2>/dev/null; "
+        "else printf ''; fi");
+#endif
+}
+#endif
 
 bool looks_textual(const std::string& path) {
     const auto dot = path.find_last_of('.');
@@ -181,6 +260,25 @@ void copy_to_buffer(char* buffer, std::size_t size, const std::string& value) {
     std::snprintf(buffer, size, "%s", value.c_str());
 }
 
+void select_file(GuiState& state, const std::string& path) {
+    if (path.empty()) {
+        return;
+    }
+    if (!regular_file_for_ui(path)) {
+        state.log.add("Choose a file, not a folder: " + path);
+        return;
+    }
+    copy_to_buffer(state.file_path, sizeof(state.file_path), path);
+    state.log.add("Selected file: " + file_name_only(path));
+}
+
+void choose_file(GuiState& state) {
+    const auto path = open_file_dialog();
+    if (!path.empty()) {
+        select_file(state, path);
+    }
+}
+
 void start_listener(GuiState& state, const TransferOptions& options) {
     if (state.listener.joinable()) {
         state.stop_listener = true;
@@ -239,14 +337,55 @@ void stop_listener(GuiState& state) {
     }
 }
 
+void draw_file_selector(GuiState& state) {
+    const bool has_file = state.file_path[0] != '\0';
+    const bool valid_file = has_file && regular_file_for_ui(state.file_path);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, has_file ? ImVec4(1.00f, 1.00f, 1.00f, 1.0f) : ImVec4(0.93f, 0.97f, 1.00f, 1.0f));
+    ImGui::BeginChild("file_selector", ImVec2(0, 148), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const ImVec2 pos = ImGui::GetWindowPos();
+    const ImVec2 max = ImVec2(pos.x + ImGui::GetWindowWidth(), pos.y + ImGui::GetWindowHeight());
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRect(pos, max, has_file ? u32(203, 213, 225) : u32(67, 132, 220), 8.0f, 0, has_file ? 1.0f : 2.0f);
+
+    ImGui::SetCursorPos(ImVec2(16, 14));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.14f, 0.22f, 1.0f));
+    ImGui::TextUnformatted(has_file ? "Selected file" : "Drop file here");
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+
+    if (has_file) {
+        const std::string path = state.file_path;
+        ImGui::TextWrapped("%s", file_name_only(path).c_str());
+        ImGui::TextDisabled("%s", valid_file ? human_size(file_size_or_zero(path)).c_str() : "File is not available");
+        ImGui::TextDisabled("%s", path.c_str());
+    } else {
+        ImGui::TextWrapped("Drag a file into this window, or click Choose File.");
+        ImGui::TextDisabled("The receiver will keep the original filename.");
+    }
+
+    ImGui::SetCursorPosY(ImGui::GetWindowHeight() - 45.0f);
+    if (secondary_button(has_file ? "Change File" : "Choose File", ImVec2(has_file ? 130.0f : -1.0f, 32.0f))) {
+        choose_file(state);
+    }
+    if (has_file) {
+        ImGui::SameLine();
+        if (secondary_button("Clear", ImVec2(82.0f, 32.0f))) {
+            state.file_path[0] = '\0';
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
 void draw_send_panel(GuiState& state, const TransferOptions& options) {
     section_label("Send");
     ImGui::InputText("Target IP", state.target_host, sizeof(state.target_host));
     ImGui::InputInt("UDP Port", &state.udp_port);
     state.udp_port = std::max(1, std::min(65535, state.udp_port));
-    ImGui::InputText("File path", state.file_path, sizeof(state.file_path));
+    draw_file_selector(state);
 
-    const bool can_send = state.file_path[0] != '\0' && state.target_host[0] != '\0' && !state.sending.load();
+    const bool file_ready = state.file_path[0] != '\0' && regular_file_for_ui(state.file_path);
+    const bool can_send = file_ready && state.target_host[0] != '\0' && !state.sending.load();
     if (!can_send) {
         ImGui::BeginDisabled();
     }
@@ -271,7 +410,7 @@ void draw_send_panel(GuiState& state, const TransferOptions& options) {
     section_label("Preview");
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.98f, 0.99f, 1.0f, 1.0f));
     ImGui::BeginChild("preview", ImVec2(0, 176), true);
-    if (state.file_path[0]) {
+    if (file_ready) {
         const std::string path = state.file_path;
         ImGui::TextWrapped("%s", file_name_only(path).c_str());
         ImGui::TextDisabled("%s", human_size(file_size_or_zero(path)).c_str());
@@ -281,7 +420,7 @@ void draw_send_panel(GuiState& state, const TransferOptions& options) {
             ImGui::TextUnformatted(preview.c_str());
         }
     } else {
-        ImGui::TextDisabled("Drop a file here or paste a path.");
+        ImGui::TextDisabled("No file selected.");
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -465,6 +604,7 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
         SDL_Quit();
         return 2;
     }
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
@@ -497,8 +637,7 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
                 running = false;
             }
             if (event.type == SDL_DROPFILE && event.drop.file) {
-                copy_to_buffer(state.file_path, sizeof(state.file_path), event.drop.file);
-                state.log.add("Selected " + std::string(event.drop.file));
+                select_file(state, event.drop.file);
                 SDL_free(event.drop.file);
             }
         }
