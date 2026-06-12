@@ -102,6 +102,7 @@ struct ReceivePrompt {
 struct GuiState {
     char output_dir[1024] = "downloads";
     char chat_input[512] = "";
+    char manual_peer_ip[64] = "";
     int selected_peer = 0;
     int udp_port = kFixedUdpPort;
     std::atomic_bool sending{false};
@@ -793,6 +794,16 @@ void upsert_peer(GuiState& state, const std::string& ip, const std::string& labe
     state.peers.push_back(peer);
 }
 
+void select_peer_ip(GuiState& state, const std::string& ip) {
+    std::lock_guard<std::mutex> lock(state.peers_mutex);
+    for (std::size_t i = 0; i < state.peers.size(); ++i) {
+        if (state.peers[i].ip == ip) {
+            state.selected_peer = static_cast<int>(i);
+            return;
+        }
+    }
+}
+
 void refresh_local_networks(GuiState& state) {
     state.local_networks = collect_local_networks();
     state.local_ips.clear();
@@ -1170,6 +1181,26 @@ void draw_left_panel(GuiState& state) {
             }
         }
         ImGui::EndCombo();
+    }
+    ImGui::Dummy(ImVec2(1, 8));
+    ImGui::PushItemWidth(-68.0f);
+    const bool manual_enter = ImGui::InputTextWithHint("##manual_peer_ip",
+                                                       "IPv4",
+                                                       state.manual_peer_ip,
+                                                       sizeof(state.manual_peer_ip),
+                                                       ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    const bool manual_use = secondary_button("Use", ImVec2(56, 32));
+    if ((manual_enter || manual_use) && state.manual_peer_ip[0]) {
+        const std::string ip = state.manual_peer_ip;
+        if (valid_ipv4(ip) && ip != "0.0.0.0" && ip != "255.255.255.255") {
+            upsert_peer(state, ip, "Manual");
+            select_peer_ip(state, ip);
+            state.log.add("Manual peer " + ip);
+        } else {
+            state.log.add("Invalid IP " + ip);
+        }
     }
     ImGui::Dummy(ImVec2(1, 8));
     if (state.discovering.load()) {
