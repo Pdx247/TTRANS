@@ -339,14 +339,25 @@ bool send_with_ack(UdpSocket& sock,
     return false;
 }
 
-void send_control(UdpSocket& sock, const Endpoint& peer, PacketType type, uint32_t session, uint32_t seq, uint32_t total) {
+void send_packet(UdpSocket& sock,
+                 const Endpoint& peer,
+                 PacketType type,
+                 uint32_t session,
+                 uint32_t seq,
+                 uint32_t total,
+                 const std::vector<uint8_t>& payload = std::vector<uint8_t>()) {
     Packet packet;
     packet.type = type;
     packet.session = session;
     packet.seq = seq;
     packet.total = total;
+    packet.payload = payload;
     const auto bytes = encode_packet(packet);
     sock.send_bytes(peer.host, peer.port, bytes.data(), bytes.size());
+}
+
+void send_control(UdpSocket& sock, const Endpoint& peer, PacketType type, uint32_t session, uint32_t seq, uint32_t total) {
+    send_packet(sock, peer, type, session, seq, total);
 }
 
 void log_line(const LogFn& log, const std::string& line);
@@ -661,7 +672,8 @@ bool receive_forever(uint16_t port,
                      const TransferOptions& options,
                      const AcceptFn& accept,
                      const StopFn& should_stop,
-                     const LogFn& log) {
+                     const LogFn& log,
+                     const PeerPacketFn& peer_packet) {
     UdpSocket sock;
     if (!sock.valid() || !sock.bind_port(port) || !sock.set_timeout(std::min(options.timeout_ms, 250))) {
         log_line(log, "Unable to bind UDP port " + std::to_string(port));
@@ -677,6 +689,28 @@ bool receive_forever(uint16_t port,
         }
         Packet meta;
         if (!decode_packet(raw.data(), raw.size(), meta) || meta.type != PacketType::Meta) {
+            if (meta.type == PacketType::DiscoveryPing) {
+                const std::string payload = "TTrans";
+                send_packet(sock,
+                            peer,
+                            PacketType::DiscoveryPong,
+                            meta.session,
+                            meta.seq,
+                            meta.total,
+                            std::vector<uint8_t>(payload.begin(), payload.end()));
+                if (peer_packet) {
+                    peer_packet(peer, meta);
+                }
+            } else if (meta.type == PacketType::Chat || meta.type == PacketType::SpeedPong || meta.type == PacketType::DiscoveryPong) {
+                if (peer_packet) {
+                    peer_packet(peer, meta);
+                }
+            } else if (meta.type == PacketType::SpeedProbe) {
+                send_packet(sock, peer, PacketType::SpeedPong, meta.session, meta.seq, meta.total, meta.payload);
+                if (peer_packet) {
+                    peer_packet(peer, meta);
+                }
+            }
             continue;
         }
         const auto info = parse_incoming_file(meta, peer);

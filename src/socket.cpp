@@ -99,6 +99,16 @@ bool UdpSocket::set_timeout(int timeout_ms) {
 #endif
 }
 
+bool UdpSocket::set_broadcast(bool enabled) {
+#ifdef _WIN32
+    BOOL value = enabled ? TRUE : FALSE;
+    return setsockopt(native(handle_), SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&value), sizeof(value)) == 0;
+#else
+    int value = enabled ? 1 : 0;
+    return setsockopt(native(handle_), SOL_SOCKET, SO_BROADCAST, &value, sizeof(value)) == 0;
+#endif
+}
+
 bool UdpSocket::send_bytes(const std::string& host, uint16_t port, const uint8_t* data, std::size_t size) {
 #ifdef _WIN32
     sockaddr_in addr{};

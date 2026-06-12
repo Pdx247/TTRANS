@@ -30,6 +30,11 @@ enum class PacketType : uint8_t {
     DoneAck = 6,
     MetaReject = 7,
     MetaWait = 8,
+    DiscoveryPing = 9,
+    DiscoveryPong = 10,
+    Chat = 11,
+    SpeedProbe = 12,
+    SpeedPong = 13,
 };
 
 struct IncomingFile {
@@ -53,6 +58,8 @@ struct Packet {
     std::vector<uint8_t> payload;
 };
 
+using PeerPacketFn = std::function<void(const Endpoint&, const Packet&)>;
+
 class UdpSocket {
 public:
     UdpSocket();
@@ -64,6 +71,7 @@ public:
     bool valid() const;
     bool bind_port(uint16_t port);
     bool set_timeout(int timeout_ms);
+    bool set_broadcast(bool enabled);
     bool send_bytes(const std::string& host, uint16_t port, const uint8_t* data, std::size_t size);
     bool recv_bytes(std::vector<uint8_t>& data, Endpoint& from, std::size_t max_size);
 
@@ -97,7 +105,8 @@ bool receive_forever(uint16_t port,
                      const TransferOptions& options,
                      const AcceptFn& accept,
                      const StopFn& should_stop,
-                     const LogFn& log);
+                     const LogFn& log,
+                     const PeerPacketFn& peer_packet = PeerPacketFn());
 
 int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const TransferOptions& options);
 
