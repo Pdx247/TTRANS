@@ -47,6 +47,7 @@ constexpr const char* kGithubUrl = "https://github.com/Pdx247/TTRANS";
 
 ImFont* g_icon_solid = nullptr;
 ImFont* g_icon_brands = nullptr;
+bool g_dark_mode = false;
 
 struct SelectedFile {
     std::string path;
@@ -56,6 +57,12 @@ struct PeerInfo {
     std::string ip;
     std::string label;
     uint64_t last_seen_ms = 0;
+};
+
+struct LocalNetwork {
+    std::string ip;
+    std::string subnet_mask;
+    std::string broadcast;
 };
 
 struct ChatMessage {
@@ -103,8 +110,10 @@ struct GuiState {
     std::atomic_bool stop_listener{false};
     std::atomic_bool stop_discovery{false};
     std::atomic<float> transfer_progress{0.0f};
+    bool dark_mode = false;
     std::vector<SelectedFile> files;
     std::vector<std::string> local_ips;
+    std::vector<LocalNetwork> local_networks;
     std::vector<PeerInfo> peers;
     std::vector<ChatMessage> chat;
     std::string transfer_status;
@@ -120,6 +129,18 @@ struct GuiState {
 
 ImU32 u32(int r, int g, int b, int a = 255) {
     return IM_COL32(r, g, b, a);
+}
+
+ImVec4 rgba(int r, int g, int b, int a = 255) {
+    return ImVec4(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+}
+
+ImVec4 theme_vec4(int lr, int lg, int lb, int dr, int dg, int db, int a = 255) {
+    return g_dark_mode ? rgba(dr, dg, db, a) : rgba(lr, lg, lb, a);
+}
+
+ImU32 theme_u32(int lr, int lg, int lb, int dr, int dg, int db, int a = 255) {
+    return g_dark_mode ? u32(dr, dg, db, a) : u32(lr, lg, lb, a);
 }
 
 std::string human_size(uint64_t bytes) {
@@ -251,6 +272,75 @@ std::vector<std::string> extract_ipv4_addresses(const std::string& text) {
     return ips;
 }
 
+bool ipv4_to_u32(const std::string& text, uint32_t& value) {
+    if (!valid_ipv4(text)) {
+        return false;
+    }
+    uint32_t result = 0;
+    uint32_t part = 0;
+    for (std::size_t i = 0; i <= text.size(); ++i) {
+        const char ch = i < text.size() ? text[i] : '.';
+        if (ch >= '0' && ch <= '9') {
+            part = part * 10 + static_cast<uint32_t>(ch - '0');
+        } else if (ch == '.') {
+            result = (result << 8) | part;
+            part = 0;
+        }
+    }
+    value = result;
+    return true;
+}
+
+std::string u32_to_ipv4(uint32_t value) {
+    std::ostringstream out;
+    out << ((value >> 24) & 0xff) << '.'
+        << ((value >> 16) & 0xff) << '.'
+        << ((value >> 8) & 0xff) << '.'
+        << (value & 0xff);
+    return out.str();
+}
+
+std::string broadcast_from_ip_mask(const std::string& ip, const std::string& mask) {
+    uint32_t ip_value = 0;
+    uint32_t mask_value = 0;
+    if (!ipv4_to_u32(ip, ip_value) || !ipv4_to_u32(mask, mask_value) || mask_value == 0) {
+        return {};
+    }
+    return u32_to_ipv4((ip_value & mask_value) | (~mask_value));
+}
+
+std::string legacy_last_octet_broadcast(const std::string& ip) {
+    const auto dot = ip.find_last_of('.');
+    if (dot == std::string::npos || ip == "127.0.0.1") {
+        return {};
+    }
+    return ip.substr(0, dot + 1) + "255";
+}
+
+void add_unique_string(std::vector<std::string>& values, const std::string& value) {
+    if (!value.empty() && std::find(values.begin(), values.end(), value) == values.end()) {
+        values.push_back(value);
+    }
+}
+
+void add_unique_network(std::vector<LocalNetwork>& networks, const LocalNetwork& network) {
+    if (network.ip.empty()) {
+        return;
+    }
+    for (auto& current : networks) {
+        if (current.ip == network.ip) {
+            if (!network.subnet_mask.empty()) {
+                current.subnet_mask = network.subnet_mask;
+            }
+            if (!network.broadcast.empty()) {
+                current.broadcast = network.broadcast;
+            }
+            return;
+        }
+    }
+    networks.push_back(network);
+}
+
 std::vector<std::string> extract_wlan_ipv4_addresses(const std::string& text) {
     std::vector<std::string> ips;
     std::istringstream input(text);
@@ -279,22 +369,66 @@ std::vector<std::string> extract_wlan_ipv4_addresses(const std::string& text) {
     return ips;
 }
 
-std::vector<std::string> collect_local_ips() {
+std::vector<LocalNetwork> extract_wlan_networks(const std::string& text) {
+    std::vector<LocalNetwork> networks;
+    std::istringstream input(text);
+    std::string line;
+    bool in_wlan = false;
+    std::string pending_ip;
+    while (std::getline(input, line)) {
+        const bool adapter_header =
+            !line.empty() &&
+            !std::isspace(static_cast<unsigned char>(line[0])) &&
+            line.find(':') != std::string::npos;
+        if (adapter_header) {
+            in_wlan = line.find("WLAN") != std::string::npos ||
+                      line.find("Wi-Fi") != std::string::npos ||
+                      line.find("WiFi") != std::string::npos;
+            pending_ip.clear();
+        }
+        if (!in_wlan) {
+            continue;
+        }
+        if (line.find("IPv4") != std::string::npos) {
+            const auto found = extract_ipv4_addresses(line);
+            if (!found.empty()) {
+                pending_ip = found.front();
+            }
+            continue;
+        }
+        if (line.find("Subnet Mask") != std::string::npos && !pending_ip.empty()) {
+            const auto found = extract_ipv4_addresses(line);
+            if (!found.empty()) {
+                const auto broadcast = broadcast_from_ip_mask(pending_ip, found.front());
+                add_unique_network(networks, LocalNetwork{pending_ip, found.front(), broadcast});
+                pending_ip.clear();
+            }
+        }
+    }
+    return networks;
+}
+
+std::vector<LocalNetwork> collect_local_networks() {
 #ifdef _WIN32
-    auto ips = extract_wlan_ipv4_addresses(read_command_all("ipconfig"));
+    const auto ipconfig = read_command_all("ipconfig");
+    auto networks = extract_wlan_networks(ipconfig);
+    if (networks.empty()) {
+        for (const auto& ip : extract_wlan_ipv4_addresses(ipconfig)) {
+            add_unique_network(networks, LocalNetwork{ip, "", legacy_last_octet_broadcast(ip)});
+        }
+    }
 #else
+    std::vector<LocalNetwork> networks;
     auto ips = extract_ipv4_addresses(read_command_all("ip -4 addr show wlan0 2>/dev/null"));
     const auto wifi_ips = extract_ipv4_addresses(read_command_all("ip -4 addr show wlp* 2>/dev/null"));
     for (const auto& ip : wifi_ips) {
-        if (std::find(ips.begin(), ips.end(), ip) == ips.end()) {
-            ips.push_back(ip);
-        }
+        add_unique_string(ips, ip);
+    }
+    for (const auto& ip : ips) {
+        add_unique_network(networks, LocalNetwork{ip, "", legacy_last_octet_broadcast(ip)});
     }
 #endif
-    if (std::find(ips.begin(), ips.end(), "127.0.0.1") == ips.end()) {
-        ips.insert(ips.begin(), "127.0.0.1");
-    }
-    return ips;
+    return networks;
 }
 
 std::string file_name_only(const std::string& path) {
@@ -512,7 +646,7 @@ void draw_icon(FeatherIcon icon, ImVec2 pos, float size, ImU32 color) {
 }
 
 void section_label(const char* text) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.10f, 0.16f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, theme_vec4(26, 41, 64, 226, 232, 240));
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
     ImGui::SameLine();
@@ -521,7 +655,7 @@ void section_label(const char* text) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddLine(ImVec2(ImGui::GetWindowPos().x + x + 8.0f, y),
                   ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - 18.0f, y),
-                  u32(219, 226, 236), 1.0f);
+                  theme_u32(219, 226, 236, 51, 65, 85), 1.0f);
     ImGui::NewLine();
 }
 
@@ -543,10 +677,10 @@ ImVec2 centered_button_size(const char* text, const ImVec2& requested) {
 bool primary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 7));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.05f, 0.34f, 0.74f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.06f, 0.41f, 0.86f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.04f, 0.27f, 0.62f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, theme_vec4(13, 87, 189, 60, 132, 246));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme_vec4(15, 105, 219, 80, 152, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme_vec4(10, 69, 158, 40, 102, 210));
+    ImGui::PushStyleColor(ImGuiCol_Text, rgba(255, 255, 255));
     const bool clicked = ImGui::Button(text, centered_button_size(text, size));
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(2);
@@ -556,10 +690,10 @@ bool primary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
 bool secondary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 7));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.94f, 0.96f, 0.99f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.89f, 0.93f, 0.99f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.84f, 0.89f, 0.97f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.11f, 0.17f, 0.26f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, theme_vec4(240, 245, 252, 30, 41, 59));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, theme_vec4(226, 237, 252, 42, 57, 80));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, theme_vec4(214, 227, 247, 50, 68, 96));
+    ImGui::PushStyleColor(ImGuiCol_Text, theme_vec4(28, 43, 66, 226, 232, 240));
     const bool clicked = ImGui::Button(text, centered_button_size(text, size));
     ImGui::PopStyleColor(4);
     ImGui::PopStyleVar(2);
@@ -612,6 +746,18 @@ void upsert_peer(GuiState& state, const std::string& ip, const std::string& labe
     peer.label = label.empty() ? "TTrans" : label;
     peer.last_seen_ms = now_ms();
     state.peers.push_back(peer);
+}
+
+void refresh_local_networks(GuiState& state) {
+    state.local_networks = collect_local_networks();
+    state.local_ips.clear();
+    add_unique_string(state.local_ips, "127.0.0.1");
+    for (const auto& network : state.local_networks) {
+        add_unique_string(state.local_ips, network.ip);
+    }
+    for (const auto& ip : state.local_ips) {
+        upsert_peer(state, ip, ip == "127.0.0.1" ? "Loopback" : "WLAN");
+    }
 }
 
 std::vector<PeerInfo> peer_snapshot(GuiState& state) {
@@ -693,30 +839,30 @@ std::string selected_peer_ip(GuiState& state) {
     return peers[static_cast<std::size_t>(index)].ip;
 }
 
-std::vector<std::string> broadcast_targets(const std::vector<std::string>& local_ips) {
+std::vector<std::string> broadcast_targets(const std::vector<LocalNetwork>& networks) {
     std::vector<std::string> targets;
-    targets.push_back("127.0.0.1");
-    targets.push_back("255.255.255.255");
-    for (const auto& ip : local_ips) {
-        const auto dot = ip.find_last_of('.');
-        if (dot == std::string::npos || ip == "127.0.0.1") {
-            continue;
-        }
-        const auto broadcast = ip.substr(0, dot + 1) + "255";
-        if (std::find(targets.begin(), targets.end(), broadcast) == targets.end()) {
-            targets.push_back(broadcast);
-        }
+    add_unique_string(targets, "127.0.0.1");
+    add_unique_string(targets, "255.255.255.255");
+    for (const auto& network : networks) {
+        add_unique_string(targets, network.broadcast);
+        add_unique_string(targets, legacy_last_octet_broadcast(network.ip));
     }
     return targets;
 }
 
 void start_discovery(GuiState& state) {
+    if (state.discovering.load()) {
+        return;
+    }
+    if (state.discovery.joinable()) {
+        state.discovery.join();
+    }
     state.stop_discovery = false;
     state.discovering = true;
     upsert_peer(state, "127.0.0.1", "Loopback");
-    state.discovery = std::thread([&state] {
-        const auto targets = broadcast_targets(state.local_ips);
-        while (!state.stop_discovery.load()) {
+    const auto targets = broadcast_targets(state.local_networks);
+    state.discovery = std::thread([&state, targets] {
+        for (int round = 0; round < 4 && !state.stop_discovery.load(); ++round) {
             UdpSocket sock;
             if (sock.valid()) {
                 sock.set_timeout(160);
@@ -747,7 +893,7 @@ void start_discovery(GuiState& state) {
                     }
                 }
             }
-            for (int i = 0; i < 12 && !state.stop_discovery.load(); ++i) {
+            for (int i = 0; i < 2 && !state.stop_discovery.load(); ++i) {
                 SDL_Delay(100);
             }
         }
@@ -930,10 +1076,10 @@ void stop_listener(GuiState& state) {
 
 void panel_title(FeatherIcon icon, const char* title) {
     const ImVec2 pos = ImGui::GetCursorScreenPos();
-    draw_icon(icon, ImVec2(pos.x, pos.y + 1.0f), 18.0f, u32(38, 64, 102));
+    draw_icon(icon, ImVec2(pos.x, pos.y + 1.0f), 18.0f, theme_u32(38, 64, 102, 148, 163, 184));
     ImGui::Dummy(ImVec2(24.0f, 20.0f));
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.14f, 0.22f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, theme_vec4(20, 36, 56, 226, 232, 240));
     ImGui::TextUnformatted(title);
     ImGui::PopStyleColor();
     ImGui::Spacing();
@@ -960,10 +1106,25 @@ void draw_left_panel(GuiState& state) {
         }
         ImGui::EndCombo();
     }
+    ImGui::Dummy(ImVec2(1, 8));
+    if (state.discovering.load()) {
+        ImGui::BeginDisabled();
+    }
+    if (secondary_button(state.discovering.load() ? "Searching" : "Search", ImVec2(-1, 34))) {
+        refresh_local_networks(state);
+        start_discovery(state);
+    }
+    if (state.discovering.load()) {
+        ImGui::EndDisabled();
+    }
+    ImGui::Dummy(ImVec2(1, 6));
+    if (secondary_button(state.dark_mode ? "Day" : "Night", ImVec2(-1, 34))) {
+        state.dark_mode = !state.dark_mode;
+    }
 
     ImGui::Dummy(ImVec2(1, 10));
     panel_title(FeatherIcon::Users, "WLAN");
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.97f, 0.98f, 1.00f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme_vec4(247, 250, 255, 15, 23, 42));
     ImGui::BeginChild("local_ips", ImVec2(0, 104), true);
     for (const auto& ip : state.local_ips) {
         ImGui::BulletText("%s", ip.c_str());
@@ -1031,27 +1192,32 @@ void draw_file_row(GuiState& state, std::size_t index) {
     const auto path = state.files[index].path;
     const auto name = file_name_only(path);
     const auto size = path_file_size(path);
-    const ImVec2 row_pos = ImGui::GetCursorScreenPos();
-    draw_icon(icon_for_file(path), ImVec2(row_pos.x + 6.0f, row_pos.y + 7.0f), 28.0f, u32(42, 105, 185));
-    ImGui::Dummy(ImVec2(42.0f, 42.0f));
-    ImGui::SameLine();
-    ImGui::BeginGroup();
-    ImGui::TextWrapped("%s", name.c_str());
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    const ImVec2 icon_pos = ImGui::GetCursorScreenPos();
+    draw_icon(icon_for_file(path), ImVec2(icon_pos.x + 4.0f, icon_pos.y + 7.0f), 28.0f, theme_u32(42, 105, 185, 96, 165, 250));
+    ImGui::Dummy(ImVec2(38.0f, 42.0f));
+
+    ImGui::TableSetColumnIndex(1);
+    ImGui::PushTextWrapPos(ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x);
+    ImGui::TextUnformatted(name.c_str());
+    ImGui::PopTextWrapPos();
     const auto ext = file_extension(path);
     if (ext.empty()) {
         ImGui::TextDisabled("%s", human_size(size).c_str());
     } else {
         ImGui::TextDisabled(".%s  %s", ext.c_str(), human_size(size).c_str());
     }
-    ImGui::EndGroup();
-    ImGui::SameLine(ImGui::GetWindowWidth() - 86.0f);
+
+    ImGui::TableSetColumnIndex(2);
     ImGui::PushID(static_cast<int>(index));
-    if (secondary_button("Remove", ImVec2(68, 30))) {
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 5.0f);
+    if (secondary_button("Remove", ImVec2(76, 30))) {
         state.files.erase(state.files.begin() + static_cast<std::ptrdiff_t>(index));
         set_status(state, "");
     }
     ImGui::PopID();
-    ImGui::Separator();
 }
 
 void draw_center_panel(GuiState& state, const TransferOptions& options) {
@@ -1067,21 +1233,39 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
     }
 
     ImGui::Dummy(ImVec2(1, 8));
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, state.files.empty() ? ImVec4(0.93f, 0.97f, 1.0f, 1.0f) : ImVec4(1, 1, 1, 1));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                          state.files.empty() ? theme_vec4(238, 247, 255, 15, 23, 42)
+                                              : theme_vec4(255, 255, 255, 11, 18, 32));
     ImGui::BeginChild("file_queue", ImVec2(0, 328), true);
     const ImVec2 pos = ImGui::GetWindowPos();
     const ImVec2 max = ImVec2(pos.x + ImGui::GetWindowWidth(), pos.y + ImGui::GetWindowHeight());
-    ImGui::GetWindowDrawList()->AddRect(pos, max, state.files.empty() ? u32(64, 128, 210) : u32(218, 226, 236), 8.0f, 0, state.files.empty() ? 2.0f : 1.0f);
+    ImGui::GetWindowDrawList()->AddRect(pos,
+                                        max,
+                                        state.files.empty() ? theme_u32(64, 128, 210, 96, 165, 250)
+                                                            : theme_u32(218, 226, 236, 51, 65, 85),
+                                        8.0f,
+                                        0,
+                                        state.files.empty() ? 2.0f : 1.0f);
     if (state.files.empty()) {
         const ImVec2 center = ImVec2(pos.x + ImGui::GetWindowWidth() * 0.5f - 14.0f, pos.y + 74.0f);
-        draw_icon(FeatherIcon::File, center, 40.0f, u32(64, 128, 210));
+        draw_icon(FeatherIcon::File, center, 40.0f, theme_u32(64, 128, 210, 96, 165, 250));
     } else {
-        for (std::size_t i = 0; i < state.files.size();) {
-            const std::size_t before = state.files.size();
-            draw_file_row(state, i);
-            if (state.files.size() == before) {
-                ++i;
+        ImGuiTableFlags flags = ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_BordersInnerH |
+                                ImGuiTableFlags_SizingStretchProp |
+                                ImGuiTableFlags_NoPadOuterX;
+        if (ImGui::BeginTable("file_rows", 3, flags)) {
+            ImGui::TableSetupColumn("icon", ImGuiTableColumnFlags_WidthFixed, 44.0f);
+            ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("remove", ImGuiTableColumnFlags_WidthFixed, 88.0f);
+            for (std::size_t i = 0; i < state.files.size();) {
+                const std::size_t before = state.files.size();
+                draw_file_row(state, i);
+                if (state.files.size() == before) {
+                    ++i;
+                }
             }
+            ImGui::EndTable();
         }
     }
     ImGui::EndChild();
@@ -1105,14 +1289,16 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
 void draw_right_panel(GuiState& state) {
     panel_title(FeatherIcon::Message, "Chat");
     const auto peer_ip = selected_peer_ip(state);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.98f, 0.99f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme_vec4(250, 252, 255, 15, 23, 42));
     ImGui::BeginChild("chat_history", ImVec2(0, 332), true);
     const auto messages = chat_snapshot(state);
     for (const auto& message : messages) {
         if (message.ip != peer_ip) {
             continue;
         }
-        ImGui::PushStyleColor(ImGuiCol_Text, message.outgoing ? ImVec4(0.04f, 0.30f, 0.66f, 1.0f) : ImVec4(0.10f, 0.15f, 0.23f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text,
+                              message.outgoing ? theme_vec4(10, 77, 168, 147, 197, 253)
+                                               : theme_vec4(26, 38, 59, 226, 232, 240));
         ImGui::TextWrapped("%s  %s", message.outgoing ? "Me" : message.ip.c_str(), message.text.c_str());
         ImGui::PopStyleColor();
         ImGui::Spacing();
@@ -1146,8 +1332,38 @@ void draw_right_panel(GuiState& state) {
     }
 }
 
+void apply_palette(bool dark_mode) {
+    g_dark_mode = dark_mode;
+    ImGuiStyle& style = ImGui::GetStyle();
+    if (dark_mode) {
+        ImGui::StyleColorsDark();
+    } else {
+        ImGui::StyleColorsLight();
+    }
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_Text] = theme_vec4(26, 38, 59, 226, 232, 240);
+    colors[ImGuiCol_TextDisabled] = theme_vec4(104, 117, 138, 148, 163, 184);
+    colors[ImGuiCol_WindowBg] = theme_vec4(242, 247, 252, 7, 12, 22);
+    colors[ImGuiCol_ChildBg] = theme_vec4(255, 255, 255, 15, 23, 42);
+    colors[ImGuiCol_PopupBg] = theme_vec4(255, 255, 255, 15, 23, 42);
+    colors[ImGuiCol_Border] = theme_vec4(214, 224, 238, 51, 65, 85);
+    colors[ImGuiCol_FrameBg] = theme_vec4(247, 250, 255, 17, 24, 39);
+    colors[ImGuiCol_FrameBgHovered] = theme_vec4(235, 242, 252, 30, 41, 59);
+    colors[ImGuiCol_FrameBgActive] = theme_vec4(224, 235, 249, 42, 57, 80);
+    colors[ImGuiCol_Header] = theme_vec4(230, 239, 252, 30, 41, 59);
+    colors[ImGuiCol_HeaderHovered] = theme_vec4(214, 229, 250, 42, 57, 80);
+    colors[ImGuiCol_HeaderActive] = theme_vec4(196, 217, 247, 51, 65, 85);
+    colors[ImGuiCol_CheckMark] = theme_vec4(13, 87, 189, 96, 165, 250);
+    colors[ImGuiCol_ScrollbarBg] = theme_vec4(238, 244, 251, 11, 18, 32);
+    colors[ImGuiCol_ScrollbarGrab] = theme_vec4(194, 207, 226, 51, 65, 85);
+    colors[ImGuiCol_ScrollbarGrabHovered] = theme_vec4(164, 183, 211, 71, 85, 105);
+    colors[ImGuiCol_TableRowBg] = theme_vec4(255, 255, 255, 11, 18, 32);
+    colors[ImGuiCol_TableRowBgAlt] = theme_vec4(247, 250, 255, 15, 23, 42);
+    colors[ImGuiCol_PlotHistogram] = theme_vec4(13, 87, 189, 96, 165, 250);
+    colors[ImGuiCol_PlotHistogramHovered] = theme_vec4(15, 105, 219, 147, 197, 253);
+}
+
 void apply_style() {
-    ImGui::StyleColorsLight();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0.0f;
     style.ChildRounding = 8.0f;
@@ -1160,19 +1376,7 @@ void apply_style() {
     style.ItemSpacing = ImVec2(10, 9);
     style.ItemInnerSpacing = ImVec2(8, 6);
     style.ScrollbarSize = 12.0f;
-    ImVec4* colors = style.Colors;
-    colors[ImGuiCol_Text] = ImVec4(0.10f, 0.15f, 0.23f, 1.0f);
-    colors[ImGuiCol_TextDisabled] = ImVec4(0.45f, 0.51f, 0.60f, 1.0f);
-    colors[ImGuiCol_WindowBg] = ImVec4(0.95f, 0.97f, 0.99f, 1.0f);
-    colors[ImGuiCol_ChildBg] = ImVec4(1.00f, 1.00f, 1.00f, 1.0f);
-    colors[ImGuiCol_Border] = ImVec4(0.84f, 0.88f, 0.93f, 1.0f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.97f, 0.98f, 1.00f, 1.0f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.92f, 0.95f, 0.99f, 1.0f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.88f, 0.92f, 0.98f, 1.0f);
-    colors[ImGuiCol_Header] = ImVec4(0.90f, 0.94f, 0.99f, 1.0f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.84f, 0.90f, 0.98f, 1.0f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.77f, 0.86f, 0.97f, 1.0f);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.05f, 0.34f, 0.74f, 1.0f);
+    apply_palette(false);
 }
 
 void load_crisp_font(float scale) {
@@ -1317,13 +1521,9 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
     (void)udp_port;
     state.udp_port = kFixedUdpPort;
     copy_to_buffer(state.output_dir, sizeof(state.output_dir), output_dir.empty() ? "downloads" : output_dir);
-    state.local_ips = collect_local_ips();
-    for (const auto& ip : state.local_ips) {
-        upsert_peer(state, ip, ip == "127.0.0.1" ? "Loopback" : "WLAN");
-    }
+    refresh_local_networks(state);
     state.log.add("TTrans native GUI ready.");
     start_listener(state, options);
-    start_discovery(state);
 
     bool running = true;
     while (running) {
@@ -1341,6 +1541,7 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
+        apply_palette(state.dark_mode);
         ImGui::NewFrame();
 
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
@@ -1356,9 +1557,22 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
         const float full_width = ImGui::GetContentRegionAvail().x;
         const float full_height = ImGui::GetContentRegionAvail().y;
         const float gap = 12.0f * dpi_scale;
-        const float left_width = std::min(280.0f * dpi_scale, full_width * 0.27f);
-        const float right_width = std::min(330.0f * dpi_scale, full_width * 0.32f);
-        const float mid_width = std::max(320.0f * dpi_scale, full_width - left_width - right_width - gap * 2.0f);
+        const float panel_width = std::max(0.0f, full_width - gap * 2.0f);
+        float left_width = std::min(240.0f, panel_width * 0.23f);
+        float right_width = std::min(290.0f, panel_width * 0.27f);
+        float mid_width = panel_width - left_width - right_width;
+        const float desired_mid = std::min(520.0f, panel_width * 0.52f);
+        if (mid_width < desired_mid) {
+            float shortage = desired_mid - mid_width;
+            const float right_min = std::min(240.0f, panel_width * 0.27f);
+            const float left_min = std::min(200.0f, panel_width * 0.22f);
+            const float right_cut = std::min(shortage * 0.65f, std::max(0.0f, right_width - right_min));
+            right_width -= right_cut;
+            shortage -= right_cut;
+            const float left_cut = std::min(shortage, std::max(0.0f, left_width - left_min));
+            left_width -= left_cut;
+            mid_width = panel_width - left_width - right_width;
+        }
 
         ImGui::BeginChild("left_panel", ImVec2(left_width, full_height), true);
         draw_left_panel(state);
@@ -1378,7 +1592,11 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
         int display_h = 0;
         SDL_GL_GetDrawableSize(window, &display_w, &display_h);
         glViewport(0, 0, display_w, display_h);
-        glClearColor(0.95f, 0.97f, 0.99f, 1.0f);
+        if (state.dark_mode) {
+            glClearColor(0.03f, 0.05f, 0.09f, 1.0f);
+        } else {
+            glClearColor(0.95f, 0.97f, 0.99f, 1.0f);
+        }
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
