@@ -7,6 +7,9 @@ if (Test-Path $packageDir) { Remove-Item -Recurse -Force $packageDir }
 New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Copy-Item -Force -Path (Join-Path $root "dist\ttrans.exe") -Destination (Join-Path $packageDir "ttrans.exe")
 Copy-Item -Force -Path (Join-Path $root "dist\ttrans-gui.exe") -Destination (Join-Path $packageDir "ttrans-gui.exe")
+New-Item -ItemType Directory -Force -Path (Join-Path $packageDir "assets") | Out-Null
+Copy-Item -Force -Path (Join-Path $root "assets\fa-*.ttf") -Destination (Join-Path $packageDir "assets")
+Copy-Item -Force -Path (Join-Path $root "assets\FONT-AWESOME-LICENSE.txt") -Destination (Join-Path $packageDir "assets")
 $sdl = where.exe SDL2.dll 2>$null | Select-Object -First 1
 if ($sdl) {
     Copy-Item -Force -Path $sdl -Destination (Join-Path $packageDir "SDL2.dll")

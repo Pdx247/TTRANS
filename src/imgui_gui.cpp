@@ -45,6 +45,9 @@ namespace {
 constexpr uint16_t kFixedUdpPort = 44777;
 constexpr const char* kGithubUrl = "https://github.com/Pdx247/TTRANS";
 
+ImFont* g_icon_solid = nullptr;
+ImFont* g_icon_brands = nullptr;
+
 struct SelectedFile {
     std::string path;
 };
@@ -104,8 +107,8 @@ struct GuiState {
     std::vector<std::string> local_ips;
     std::vector<PeerInfo> peers;
     std::vector<ChatMessage> chat;
-    std::string transfer_status = "选择文件后开始传输";
-    std::string speed_status = "未测速";
+    std::string transfer_status;
+    std::string speed_status;
     std::mutex peers_mutex;
     std::mutex chat_mutex;
     std::mutex status_mutex;
@@ -248,13 +251,44 @@ std::vector<std::string> extract_ipv4_addresses(const std::string& text) {
     return ips;
 }
 
+std::vector<std::string> extract_wlan_ipv4_addresses(const std::string& text) {
+    std::vector<std::string> ips;
+    std::istringstream input(text);
+    std::string line;
+    bool in_wlan = false;
+    while (std::getline(input, line)) {
+        const bool adapter_header =
+            !line.empty() &&
+            !std::isspace(static_cast<unsigned char>(line[0])) &&
+            line.find(':') != std::string::npos;
+        if (adapter_header) {
+            in_wlan = line.find("WLAN") != std::string::npos ||
+                      line.find("Wi-Fi") != std::string::npos ||
+                      line.find("WiFi") != std::string::npos;
+        }
+        if (!in_wlan || line.find("IPv4") == std::string::npos) {
+            continue;
+        }
+        const auto found = extract_ipv4_addresses(line);
+        for (const auto& ip : found) {
+            if (std::find(ips.begin(), ips.end(), ip) == ips.end()) {
+                ips.push_back(ip);
+            }
+        }
+    }
+    return ips;
+}
+
 std::vector<std::string> collect_local_ips() {
 #ifdef _WIN32
-    auto ips = extract_ipv4_addresses(read_command_all("ipconfig"));
+    auto ips = extract_wlan_ipv4_addresses(read_command_all("ipconfig"));
 #else
-    auto ips = extract_ipv4_addresses(read_command_all("hostname -I 2>/dev/null"));
-    if (ips.empty()) {
-        ips = extract_ipv4_addresses(read_command_all("ifconfig 2>/dev/null"));
+    auto ips = extract_ipv4_addresses(read_command_all("ip -4 addr show wlan0 2>/dev/null"));
+    const auto wifi_ips = extract_ipv4_addresses(read_command_all("ip -4 addr show wlp* 2>/dev/null"));
+    for (const auto& ip : wifi_ips) {
+        if (std::find(ips.begin(), ips.end(), ip) == ips.end()) {
+            ips.push_back(ip);
+        }
     }
 #endif
     if (std::find(ips.begin(), ips.end(), "127.0.0.1") == ips.end()) {
@@ -448,117 +482,32 @@ FeatherIcon icon_for_file(const std::string& path) {
     return FeatherIcon::File;
 }
 
-void draw_feather_icon(FeatherIcon icon, ImVec2 pos, float size, ImU32 color) {
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    const float s = size / 24.0f;
-    auto p = [&](float x, float y) {
-        return ImVec2(pos.x + x * s, pos.y + y * s);
-    };
-    const float t = std::max(1.4f, size / 18.0f);
-    const float r = 2.0f * s;
-    auto arc = [&](ImVec2 center, float radius, float a_min, float a_max) {
-        draw->PathArcTo(center, radius, a_min, a_max, 18);
-        draw->PathStroke(color, 0, t);
-    };
-
-    if (icon == FeatherIcon::File || icon == FeatherIcon::FileText) {
-        draw->AddRect(p(5, 2), p(19, 22), color, r, 0, t);
-        draw->AddLine(p(14, 2), p(19, 7), color, t);
-        draw->AddLine(p(14, 2), p(14, 7), color, t);
-        draw->AddLine(p(14, 7), p(19, 7), color, t);
-        if (icon == FeatherIcon::FileText) {
-            draw->AddLine(p(8, 12), p(16, 12), color, t);
-            draw->AddLine(p(8, 16), p(15, 16), color, t);
-        }
-        return;
+void draw_icon(FeatherIcon icon, ImVec2 pos, float size, ImU32 color) {
+    const char* glyph = u8"\uf15b";
+    ImFont* font = g_icon_solid;
+    switch (icon) {
+    case FeatherIcon::File: glyph = u8"\uf15b"; break;
+    case FeatherIcon::FileText: glyph = u8"\uf15c"; break;
+    case FeatherIcon::Image: glyph = u8"\uf03e"; break;
+    case FeatherIcon::Archive: glyph = u8"\uf1c6"; break;
+    case FeatherIcon::Code: glyph = u8"\uf121"; break;
+    case FeatherIcon::Music: glyph = u8"\uf001"; break;
+    case FeatherIcon::Video: glyph = u8"\uf03d"; break;
+    case FeatherIcon::Database: glyph = u8"\uf1c0"; break;
+    case FeatherIcon::Message: glyph = u8"\uf086"; break;
+    case FeatherIcon::Github:
+        glyph = u8"\uf09b";
+        font = g_icon_brands ? g_icon_brands : g_icon_solid;
+        break;
+    case FeatherIcon::Wifi: glyph = u8"\uf1eb"; break;
+    case FeatherIcon::Zap: glyph = u8"\uf0e7"; break;
+    case FeatherIcon::Send: glyph = u8"\uf1d8"; break;
+    case FeatherIcon::Users: glyph = u8"\uf0c0"; break;
     }
-    if (icon == FeatherIcon::Image) {
-        draw->AddRect(p(3, 5), p(21, 19), color, r, 0, t);
-        draw->AddCircle(p(8, 10), 1.6f * s, color, 16, t);
-        draw->AddLine(p(4, 18), p(10, 13), color, t);
-        draw->AddLine(p(10, 13), p(14, 16), color, t);
-        draw->AddLine(p(14, 16), p(17, 13), color, t);
-        draw->AddLine(p(17, 13), p(21, 18), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Archive) {
-        draw->AddRect(p(3, 5), p(21, 8), color, r, 0, t);
-        draw->AddRect(p(5, 8), p(19, 21), color, r, 0, t);
-        draw->AddLine(p(10, 12), p(14, 12), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Code) {
-        draw->AddLine(p(10, 8), p(6, 12), color, t);
-        draw->AddLine(p(6, 12), p(10, 16), color, t);
-        draw->AddLine(p(14, 8), p(18, 12), color, t);
-        draw->AddLine(p(18, 12), p(14, 16), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Music) {
-        draw->AddLine(p(9, 18), p(9, 5), color, t);
-        draw->AddLine(p(9, 5), p(19, 3), color, t);
-        draw->AddLine(p(19, 3), p(19, 15), color, t);
-        draw->AddCircle(p(7, 18), 2.4f * s, color, 18, t);
-        draw->AddCircle(p(17, 15), 2.4f * s, color, 18, t);
-        return;
-    }
-    if (icon == FeatherIcon::Video) {
-        draw->AddRect(p(3, 7), p(15, 17), color, r, 0, t);
-        draw->AddLine(p(15, 11), p(21, 7), color, t);
-        draw->AddLine(p(21, 7), p(21, 17), color, t);
-        draw->AddLine(p(21, 17), p(15, 13), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Database) {
-        arc(p(12, 6), 6.0f * s, 0.0f, 6.28318f);
-        draw->AddLine(p(5, 5), p(5, 18), color, t);
-        draw->AddLine(p(19, 5), p(19, 18), color, t);
-        arc(p(12, 18), 6.0f * s, 0.0f, 6.28318f);
-        draw->AddLine(p(6, 12), p(18, 12), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Message) {
-        draw->AddRect(p(3, 5), p(21, 17), color, r, 0, t);
-        draw->AddLine(p(8, 17), p(5, 21), color, t);
-        draw->AddLine(p(8, 17), p(12, 17), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Github) {
-        draw->AddCircle(p(12, 12), 8.5f * s, color, 28, t);
-        draw->AddLine(p(8, 16), p(8, 20), color, t);
-        draw->AddLine(p(16, 16), p(16, 20), color, t);
-        draw->AddLine(p(9, 9), p(7, 6), color, t);
-        draw->AddLine(p(15, 9), p(17, 6), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Wifi) {
-        arc(p(12, 15), 9.0f * s, 3.75f, 5.67f);
-        arc(p(12, 15), 5.5f * s, 3.75f, 5.67f);
-        draw->AddCircleFilled(p(12, 18), 1.6f * s, color);
-        return;
-    }
-    if (icon == FeatherIcon::Zap) {
-        draw->AddLine(p(13, 2), p(5, 14), color, t);
-        draw->AddLine(p(5, 14), p(13, 14), color, t);
-        draw->AddLine(p(13, 14), p(11, 22), color, t);
-        draw->AddLine(p(11, 22), p(19, 10), color, t);
-        draw->AddLine(p(19, 10), p(11, 10), color, t);
-        draw->AddLine(p(11, 10), p(13, 2), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Send) {
-        draw->AddLine(p(3, 11), p(21, 3), color, t);
-        draw->AddLine(p(21, 3), p(14, 21), color, t);
-        draw->AddLine(p(14, 21), p(11, 13), color, t);
-        draw->AddLine(p(11, 13), p(3, 11), color, t);
-        draw->AddLine(p(11, 13), p(21, 3), color, t);
-        return;
-    }
-    if (icon == FeatherIcon::Users) {
-        draw->AddCircle(p(9, 8), 3.0f * s, color, 18, t);
-        draw->AddCircle(p(17, 9), 2.4f * s, color, 18, t);
-        arc(p(9, 19), 6.0f * s, 3.55f, 5.87f);
-        arc(p(17, 19), 4.5f * s, 3.55f, 5.87f);
+    if (font) {
+        ImGui::GetWindowDrawList()->AddText(font, size, pos, color, glyph);
+    } else {
+        ImGui::GetWindowDrawList()->AddText(pos, color, "*");
     }
 }
 
@@ -574,15 +523,6 @@ void section_label(const char* text) {
                   ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - 18.0f, y),
                   u32(219, 226, 236), 1.0f);
     ImGui::NewLine();
-}
-
-void status_badge(const char* text, bool active) {
-    ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(0.85f, 0.97f, 0.91f, 1.0f) : ImVec4(0.94f, 0.95f, 0.97f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? ImVec4(0.78f, 0.94f, 0.86f, 1.0f) : ImVec4(0.91f, 0.93f, 0.96f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? ImVec4(0.72f, 0.90f, 0.81f, 1.0f) : ImVec4(0.88f, 0.91f, 0.95f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Text, active ? ImVec4(0.04f, 0.42f, 0.24f, 1.0f) : ImVec4(0.37f, 0.43f, 0.52f, 1.0f));
-    ImGui::Button(text, ImVec2(94, 0));
-    ImGui::PopStyleColor(4);
 }
 
 bool primary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
@@ -713,7 +653,7 @@ void add_file(GuiState& state, const std::string& path) {
     if (!has_file(state, path)) {
         state.files.push_back(SelectedFile{path});
     }
-    set_status(state, "已选择 " + std::to_string(state.files.size()) + " 个文件");
+    set_status(state, "");
 }
 
 void add_files(GuiState& state, const std::vector<std::string>& paths) {
@@ -751,7 +691,7 @@ std::vector<std::string> broadcast_targets(const std::vector<std::string>& local
 void start_discovery(GuiState& state) {
     state.stop_discovery = false;
     state.discovering = true;
-    upsert_peer(state, "127.0.0.1", "本机");
+    upsert_peer(state, "127.0.0.1", "Loopback");
     state.discovery = std::thread([&state] {
         const auto targets = broadcast_targets(state.local_ips);
         while (!state.stop_discovery.load()) {
@@ -805,11 +745,11 @@ void run_speed_test(GuiState& state, const std::string& host) {
         return;
     }
     state.speed_testing = true;
-    set_speed_status(state, "测速中...");
+    set_speed_status(state, "...");
     std::thread([&state, host] {
         UdpSocket sock;
         if (!sock.valid() || !sock.set_timeout(120)) {
-            set_speed_status(state, "测速失败");
+            set_speed_status(state, "Fail");
             state.speed_testing = false;
             return;
         }
@@ -867,12 +807,12 @@ void send_selected_files(GuiState& state, const TransferOptions& options) {
     const auto host = selected_peer_ip(state);
     state.sending = true;
     state.transfer_progress.store(0.0f);
-    set_status(state, "准备发送 " + std::to_string(files.size()) + " 个文件");
+    set_status(state, "");
     std::thread([&state, files, host, options] {
         const std::size_t total_files = files.size();
         for (std::size_t i = 0; i < files.size(); ++i) {
             const auto path = files[i].path;
-            set_status(state, "发送中: " + file_name_only(path));
+            set_status(state, file_name_only(path));
             auto log = [&state, i, total_files](const std::string& line) {
                 const std::string prefix = "Progress ";
                 if (line.find(prefix) == 0) {
@@ -890,13 +830,13 @@ void send_selected_files(GuiState& state, const TransferOptions& options) {
             };
             const bool ok = send_file(host, kFixedUdpPort, path, options, log);
             if (!ok) {
-                set_status(state, "发送失败: " + file_name_only(path));
+                set_status(state, file_name_only(path));
                 state.sending = false;
                 return;
             }
             state.transfer_progress.store(static_cast<float>(i + 1) / static_cast<float>(total_files));
         }
-        set_status(state, "发送完成");
+        set_status(state, "");
         state.sending = false;
     }).detach();
 }
@@ -968,7 +908,7 @@ void stop_listener(GuiState& state) {
 
 void panel_title(FeatherIcon icon, const char* title) {
     const ImVec2 pos = ImGui::GetCursorScreenPos();
-    draw_feather_icon(icon, ImVec2(pos.x, pos.y + 1.0f), 18.0f, u32(38, 64, 102));
+    draw_icon(icon, ImVec2(pos.x, pos.y + 1.0f), 18.0f, u32(38, 64, 102));
     ImGui::Dummy(ImVec2(24.0f, 20.0f));
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.14f, 0.22f, 1.0f));
@@ -977,26 +917,18 @@ void panel_title(FeatherIcon icon, const char* title) {
     ImGui::Spacing();
 }
 
-std::string peer_combo_label(const PeerInfo& peer) {
-    if (peer.label.empty()) {
-        return peer.ip;
-    }
-    return peer.ip + "  " + peer.label;
-}
-
 void draw_left_panel(GuiState& state) {
-    panel_title(FeatherIcon::Wifi, "局域网主机");
+    panel_title(FeatherIcon::Wifi, "IP");
     const auto peers = peer_snapshot(state);
     const int peer_count = static_cast<int>(peers.size());
     if (state.selected_peer >= peer_count) {
         state.selected_peer = std::max(0, peer_count - 1);
     }
-    const std::string current = peers.empty() ? "127.0.0.1  本机" : peer_combo_label(peers[static_cast<std::size_t>(state.selected_peer)]);
-    ImGui::TextDisabled("选择 IP");
+    const std::string current = peers.empty() ? "127.0.0.1" : peers[static_cast<std::size_t>(state.selected_peer)].ip;
     if (ImGui::BeginCombo("##peer_combo", current.c_str())) {
         for (int i = 0; i < peer_count; ++i) {
             const bool selected = state.selected_peer == i;
-            const auto label = peer_combo_label(peers[static_cast<std::size_t>(i)]);
+            const auto label = peers[static_cast<std::size_t>(i)].ip;
             if (ImGui::Selectable(label.c_str(), selected)) {
                 state.selected_peer = i;
             }
@@ -1006,11 +938,9 @@ void draw_left_panel(GuiState& state) {
         }
         ImGui::EndCombo();
     }
-    ImGui::TextDisabled("固定端口  %u/udp", static_cast<unsigned>(kFixedUdpPort));
-    ImGui::TextDisabled("%s", state.discovering.load() ? "正在自动发现 TTrans 主机" : "发现服务已停止");
 
     ImGui::Dummy(ImVec2(1, 10));
-    panel_title(FeatherIcon::Users, "本机 IP");
+    panel_title(FeatherIcon::Users, "WLAN");
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.97f, 0.98f, 1.00f, 1.0f));
     ImGui::BeginChild("local_ips", ImVec2(0, 104), true);
     for (const auto& ip : state.local_ips) {
@@ -1020,12 +950,11 @@ void draw_left_panel(GuiState& state) {
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(1, 10));
-    panel_title(FeatherIcon::Zap, "UDP 传输测速");
-    ImGui::TextDisabled("目标 %s", selected_peer_ip(state).c_str());
+    panel_title(FeatherIcon::Zap, "Speed");
     if (state.speed_testing.load()) {
         ImGui::BeginDisabled();
     }
-    if (secondary_button("开始测速", ImVec2(-1, 34))) {
+    if (secondary_button("Start", ImVec2(-1, 34))) {
         run_speed_test(state, selected_peer_ip(state));
     }
     if (state.speed_testing.load()) {
@@ -1048,10 +977,10 @@ void draw_incoming_popup(GuiState& state) {
         ImGui::OpenPopup("Incoming File");
     }
     if (ImGui::BeginPopupModal("Incoming File", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        section_label("Incoming file");
+        section_label("File");
         ImGui::TextWrapped("%s", pending.filename.c_str());
-        ImGui::TextDisabled("%s from %s:%u", human_size(pending.file_size).c_str(), pending.peer_host.c_str(), pending.peer_port);
-        ImGui::TextDisabled("Checksum %s", pending.checksum.c_str());
+        ImGui::TextDisabled("%s  %s:%u", human_size(pending.file_size).c_str(), pending.peer_host.c_str(), pending.peer_port);
+        ImGui::TextDisabled("%s", pending.checksum.c_str());
         ImGui::Dummy(ImVec2(1, 8));
         if (primary_button("Accept", ImVec2(128, 34))) {
             {
@@ -1081,7 +1010,7 @@ void draw_file_row(GuiState& state, std::size_t index) {
     const auto name = file_name_only(path);
     const auto size = path_file_size(path);
     const ImVec2 row_pos = ImGui::GetCursorScreenPos();
-    draw_feather_icon(icon_for_file(path), ImVec2(row_pos.x + 6.0f, row_pos.y + 7.0f), 28.0f, u32(42, 105, 185));
+    draw_icon(icon_for_file(path), ImVec2(row_pos.x + 6.0f, row_pos.y + 7.0f), 28.0f, u32(42, 105, 185));
     ImGui::Dummy(ImVec2(42.0f, 42.0f));
     ImGui::SameLine();
     ImGui::BeginGroup();
@@ -1097,22 +1026,22 @@ void draw_file_row(GuiState& state, std::size_t index) {
     ImGui::PushID(static_cast<int>(index));
     if (secondary_button("移除", ImVec2(48, 28))) {
         state.files.erase(state.files.begin() + static_cast<std::ptrdiff_t>(index));
-        set_status(state, "已选择 " + std::to_string(state.files.size()) + " 个文件");
+        set_status(state, "");
     }
     ImGui::PopID();
     ImGui::Separator();
 }
 
 void draw_center_panel(GuiState& state, const TransferOptions& options) {
-    panel_title(FeatherIcon::FileText, "文件传输");
-    if (secondary_button("选择文件", ImVec2(112, 34))) {
+    panel_title(FeatherIcon::FileText, "Files");
+    if (secondary_button("Add", ImVec2(82, 34))) {
         add_files(state, open_files_dialog());
     }
     ImGui::SameLine();
-    if (secondary_button("清空", ImVec2(76, 34))) {
+    if (secondary_button("Clear", ImVec2(82, 34))) {
         state.files.clear();
         state.transfer_progress.store(0.0f);
-        set_status(state, "选择文件后开始传输");
+        set_status(state, "");
     }
 
     ImGui::Dummy(ImVec2(1, 8));
@@ -1123,10 +1052,7 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
     ImGui::GetWindowDrawList()->AddRect(pos, max, state.files.empty() ? u32(64, 128, 210) : u32(218, 226, 236), 8.0f, 0, state.files.empty() ? 2.0f : 1.0f);
     if (state.files.empty()) {
         const ImVec2 center = ImVec2(pos.x + ImGui::GetWindowWidth() * 0.5f - 14.0f, pos.y + 74.0f);
-        draw_feather_icon(FeatherIcon::File, center, 40.0f, u32(64, 128, 210));
-        ImGui::SetCursorPosY(128.0f);
-        ImGui::SetCursorPosX(18.0f);
-        ImGui::TextWrapped("把文件拖到这里，或点击上方选择文件。支持多个文件，列表固定高度并可滚动。");
+        draw_icon(FeatherIcon::File, center, 40.0f, u32(64, 128, 210));
     } else {
         for (std::size_t i = 0; i < state.files.size();) {
             const std::size_t before = state.files.size();
@@ -1146,7 +1072,7 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
     if (!can_send) {
         ImGui::BeginDisabled();
     }
-    if (primary_button(state.sending.load() ? "发送中" : "发送文件", ImVec2(-1, 38))) {
+    if (primary_button(state.sending.load() ? "Sending" : "Send", ImVec2(-1, 38))) {
         send_selected_files(state, options);
     }
     if (!can_send) {
@@ -1155,9 +1081,8 @@ void draw_center_panel(GuiState& state, const TransferOptions& options) {
 }
 
 void draw_right_panel(GuiState& state) {
-    panel_title(FeatherIcon::Message, "聊天对话");
+    panel_title(FeatherIcon::Message, "Chat");
     const auto peer_ip = selected_peer_ip(state);
-    ImGui::TextDisabled("当前对话 %s", peer_ip.c_str());
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.98f, 0.99f, 1.0f, 1.0f));
     ImGui::BeginChild("chat_history", ImVec2(0, 332), true);
     const auto messages = chat_snapshot(state);
@@ -1166,7 +1091,7 @@ void draw_right_panel(GuiState& state) {
             continue;
         }
         ImGui::PushStyleColor(ImGuiCol_Text, message.outgoing ? ImVec4(0.04f, 0.30f, 0.66f, 1.0f) : ImVec4(0.10f, 0.15f, 0.23f, 1.0f));
-        ImGui::TextWrapped("%s  %s", message.outgoing ? "我" : message.ip.c_str(), message.text.c_str());
+        ImGui::TextWrapped("%s  %s", message.outgoing ? "Me" : message.ip.c_str(), message.text.c_str());
         ImGui::PopStyleColor();
         ImGui::Spacing();
     }
@@ -1180,7 +1105,7 @@ void draw_right_panel(GuiState& state) {
     const bool enter = ImGui::InputText("##chat_input", state.chat_input, sizeof(state.chat_input), ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
     ImGui::SameLine();
-    const bool clicked = secondary_button("发送", ImVec2(72, 32));
+    const bool clicked = secondary_button("Send", ImVec2(72, 32));
     if ((enter || clicked) && state.chat_input[0]) {
         const std::string text = state.chat_input;
         if (send_gui_packet(peer_ip, PacketType::Chat, text)) {
@@ -1190,9 +1115,9 @@ void draw_right_panel(GuiState& state) {
     }
 
     ImGui::Dummy(ImVec2(1, 12));
-    panel_title(FeatherIcon::Github, "项目仓库");
+    panel_title(FeatherIcon::Github, "GitHub");
     ImGui::TextWrapped("%s", kGithubUrl);
-    if (secondary_button("打开 GitHub", ImVec2(-1, 34))) {
+    if (secondary_button("Open", ImVec2(-1, 34))) {
 #if SDL_VERSION_ATLEAST(2, 0, 14)
         SDL_OpenURL(kGithubUrl);
 #endif
@@ -1260,10 +1185,40 @@ void load_crisp_font(float scale) {
     const ImWchar* ranges = io.Fonts->GetGlyphRangesChineseFull();
     for (int i = 0; font_paths[i]; ++i) {
         if (io.Fonts->AddFontFromFileTTF(font_paths[i], size, &config, ranges)) {
-            return;
+            break;
         }
     }
-    io.Fonts->AddFontDefault();
+    if (io.Fonts->Fonts.empty()) {
+        io.Fonts->AddFontDefault();
+    }
+
+    auto load_icon_font = [&io](const std::string& file_name, float font_size) {
+        std::vector<std::string> candidates;
+        candidates.push_back(file_name);
+        candidates.push_back(std::string("assets/") + file_name);
+        char* base = SDL_GetBasePath();
+        if (base) {
+            candidates.push_back(std::string(base) + file_name);
+            candidates.push_back(std::string(base) + "assets/" + file_name);
+            candidates.push_back(std::string(base) + "../Resources/" + file_name);
+            candidates.push_back(std::string(base) + "../Resources/assets/" + file_name);
+            SDL_free(base);
+        }
+        static const ImWchar icon_ranges[] = {0xf000, 0xf8ff, 0};
+        ImFontConfig icon_config;
+        icon_config.OversampleH = 3;
+        icon_config.OversampleV = 2;
+        icon_config.PixelSnapH = true;
+        for (const auto& path : candidates) {
+            if (ImFont* font = io.Fonts->AddFontFromFileTTF(path.c_str(), font_size, &icon_config, icon_ranges)) {
+                return font;
+            }
+        }
+        return static_cast<ImFont*>(nullptr);
+    };
+
+    g_icon_solid = load_icon_font("fa-solid-900.ttf", 16.5f * scale);
+    g_icon_brands = load_icon_font("fa-brands-400.ttf", 16.5f * scale);
 }
 
 float dpi_scale_for_window(SDL_Window* window) {
@@ -1276,19 +1231,6 @@ float dpi_scale_for_window(SDL_Window* window) {
         ddpi = 96.0f;
     }
     return std::max(1.0f, std::min(1.75f, ddpi / 96.0f));
-}
-
-void draw_header(GuiState& state) {
-    ImDrawList* draw = ImGui::GetWindowDrawList();
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const float width = ImGui::GetContentRegionAvail().x;
-    draw->AddRectFilled(pos, ImVec2(pos.x + width, pos.y + 58.0f), u32(20, 45, 75), 8.0f);
-    draw->AddCircleFilled(ImVec2(pos.x + 28.0f, pos.y + 29.0f), 13.0f, u32(56, 210, 219));
-    draw->AddText(ImVec2(pos.x + 52.0f, pos.y + 12.0f), u32(245, 248, 252), "TTrans");
-    draw->AddText(ImVec2(pos.x + 52.0f, pos.y + 33.0f), u32(164, 183, 205), "LAN file transfer");
-    ImGui::SetCursorScreenPos(ImVec2(pos.x + width - 116.0f, pos.y + 17.0f));
-    status_badge(state.listening.load() ? "LISTENING" : "STOPPED", state.listening.load());
-    ImGui::SetCursorScreenPos(ImVec2(pos.x, pos.y + 70.0f));
 }
 
 } // namespace
@@ -1321,15 +1263,15 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
     SDL_Window* window = SDL_CreateWindow("TTrans",
                                           SDL_WINDOWPOS_CENTERED,
                                           SDL_WINDOWPOS_CENTERED,
-                                          1120,
-                                          700,
+                                          1040,
+                                          640,
                                           SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         SDL_Quit();
         return 2;
     }
-    SDL_SetWindowMinimumSize(window, 980, 620);
+    SDL_SetWindowMinimumSize(window, 920, 560);
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
@@ -1354,7 +1296,7 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
     copy_to_buffer(state.output_dir, sizeof(state.output_dir), output_dir.empty() ? "downloads" : output_dir);
     state.local_ips = collect_local_ips();
     for (const auto& ip : state.local_ips) {
-        upsert_peer(state, ip, ip == "127.0.0.1" ? "本机" : "本机 IP");
+        upsert_peer(state, ip, ip == "127.0.0.1" ? "Loopback" : "WLAN");
     }
     state.log.add("TTrans native GUI ready.");
     start_listener(state, options);
@@ -1386,7 +1328,6 @@ int run_imgui_gui(uint16_t udp_port, const std::string& output_dir, const Transf
                      ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoSavedSettings);
 
-        draw_header(state);
         draw_incoming_popup(state);
 
         const float full_width = ImGui::GetContentRegionAvail().x;

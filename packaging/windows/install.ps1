@@ -10,6 +10,9 @@ New-Item -ItemType Directory -Force -Path $startMenuDir | Out-Null
 Copy-Item -Force -Path (Join-Path $source "ttrans.exe") -Destination (Join-Path $installDir "ttrans.exe")
 Copy-Item -Force -Path (Join-Path $source "ttrans-gui.exe") -Destination (Join-Path $installDir "ttrans-gui.exe")
 Copy-Item -Force -Path (Join-Path $source "*.dll") -Destination $installDir
+New-Item -ItemType Directory -Force -Path (Join-Path $installDir "assets") | Out-Null
+Copy-Item -Force -Path (Join-Path $source "assets\fa-*.ttf") -Destination (Join-Path $installDir "assets")
+Copy-Item -Force -Path (Join-Path $source "assets\FONT-AWESOME-LICENSE.txt") -Destination (Join-Path $installDir "assets")
 Copy-Item -Force -Path (Join-Path $source "start_gui.cmd") -Destination (Join-Path $installDir "start_gui.cmd")
 Copy-Item -Force -Path (Join-Path $source "uninstall.cmd") -Destination (Join-Path $installDir "uninstall.cmd")
 Copy-Item -Force -Path (Join-Path $source "uninstall.ps1") -Destination (Join-Path $installDir "uninstall.ps1")

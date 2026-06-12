@@ -4,9 +4,12 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 APP="$ROOT/dist/TTrans.app"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Frameworks"
+mkdir -p "$APP/Contents/Resources/assets"
 cmake -S "$ROOT" -B "$ROOT/build" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$ROOT/build" --config Release
 cp "$ROOT/build/ttrans" "$APP/Contents/MacOS/ttrans"
+cp "$ROOT"/assets/fa-*.ttf "$APP/Contents/Resources/assets/"
+cp "$ROOT"/assets/FONT-AWESOME-LICENSE.txt "$APP/Contents/Resources/assets/"
 SDL_DYLIB="$(otool -L "$APP/Contents/MacOS/ttrans" | awk '/libSDL2.*dylib/ {print $1; exit}')"
 if [ -n "$SDL_DYLIB" ] && [ -f "$SDL_DYLIB" ]; then
   SDL_NAME="$(basename "$SDL_DYLIB")"

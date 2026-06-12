@@ -22,4 +22,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Copy-Item -Force -Path (Join-Path $build "ttrans.exe") -Destination (Join-Path $dist "ttrans.exe")
 Copy-Item -Force -Path (Join-Path $build "ttrans-gui.exe") -Destination (Join-Path $dist "ttrans-gui.exe")
+New-Item -ItemType Directory -Force -Path (Join-Path $dist "assets") | Out-Null
+Copy-Item -Force -Path (Join-Path $root "assets\fa-*.ttf") -Destination (Join-Path $dist "assets")
+Copy-Item -Force -Path (Join-Path $root "assets\FONT-AWESOME-LICENSE.txt") -Destination (Join-Path $dist "assets")
 Write-Host "Built $dist\ttrans.exe"

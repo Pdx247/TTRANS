@@ -20,6 +20,9 @@ rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"
 cp "$BUILD/ttrans.exe" "$PACKAGE_DIR/ttrans.exe"
 cp "$BUILD/ttrans-gui.exe" "$PACKAGE_DIR/ttrans-gui.exe"
+mkdir -p "$PACKAGE_DIR/assets"
+cp "$ROOT"/assets/fa-*.ttf "$PACKAGE_DIR/assets/"
+cp "$ROOT"/assets/FONT-AWESOME-LICENSE.txt "$PACKAGE_DIR/assets/"
 cp "$MINGW_PREFIX/bin/SDL2.dll" "$PACKAGE_DIR/SDL2.dll"
 for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
   if [ -f "$MINGW_PREFIX/bin/$dll" ]; then

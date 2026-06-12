@@ -2,5 +2,5 @@
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 sh "$ROOT/scripts/build_linux.sh"
-tar -C "$ROOT/dist" -czf "$ROOT/dist/TTrans-linux-elf.tar.gz" ttrans
+tar -C "$ROOT/dist" -czf "$ROOT/dist/TTrans-linux-elf.tar.gz" ttrans assets
 echo "Packaged $ROOT/dist/TTrans-linux-elf.tar.gz"
