@@ -7,7 +7,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(FetchContent)
 find_package(OpenGL REQUIRED)
-find_package(SDL2 REQUIRED)
+find_package(SDL2 QUIET)
+
+if(NOT SDL2_FOUND)
+    set(_sdl_prefix "$ENV{CMAKE_PREFIX_PATH}")
+    if(WIN32 AND NOT _sdl_prefix)
+        set(_sdl_prefix "C:/msys64/mingw64")
+    endif()
+    find_path(SDL2_INCLUDE_DIRS
+        NAMES SDL.h
+        PATHS "${_sdl_prefix}/include/SDL2" "${_sdl_prefix}/include"
+        NO_DEFAULT_PATH
+    )
+    find_library(SDL2_LIBRARIES
+        NAMES SDL2
+        PATHS "${_sdl_prefix}/lib"
+        NO_DEFAULT_PATH
+    )
+    if(NOT SDL2_INCLUDE_DIRS OR NOT SDL2_LIBRARIES)
+        message(FATAL_ERROR "SDL2 was not found. Install SDL2 development files or set CMAKE_PREFIX_PATH.")
+    endif()
+endif()
 
 FetchContent_Declare(
     imgui

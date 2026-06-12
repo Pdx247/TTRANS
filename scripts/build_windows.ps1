@@ -14,7 +14,7 @@ if (Test-Path $mingw) {
     $env:CMAKE_PREFIX_PATH = $mingw
 }
 
-cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:CMAKE_PREFIX_PATH"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 cmake --build $build --config Release
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
