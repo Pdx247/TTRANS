@@ -30,12 +30,10 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <string>
-#include <sys/stat.h>
 #include <thread>
 #include <vector>
 
@@ -102,20 +100,6 @@ std::string human_size(uint64_t bytes) {
 std::string file_name_only(const std::string& path) {
     const auto slash = path.find_last_of("/\\");
     return slash == std::string::npos ? path : path.substr(slash + 1);
-}
-
-uint64_t file_size_or_zero(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return 0;
-    }
-    in.seekg(0, std::ios::end);
-    return static_cast<uint64_t>(in.tellg());
-}
-
-bool regular_file_for_ui(const std::string& path) {
-    struct stat st {};
-    return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFREG) != 0;
 }
 
 #ifdef _WIN32
@@ -196,13 +180,7 @@ std::string text_preview(const std::string& path) {
     if (!looks_textual(path)) {
         return {};
     }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return {};
-    }
-    std::string data(4096, '\0');
-    in.read(&data[0], static_cast<std::streamsize>(data.size()));
-    data.resize(static_cast<std::size_t>(in.gcount()));
+    std::string data = read_file_head(path, 4096);
     for (char& ch : data) {
         if (ch == '\0') {
             ch = ' ';
@@ -264,7 +242,7 @@ void select_file(GuiState& state, const std::string& path) {
     if (path.empty()) {
         return;
     }
-    if (!regular_file_for_ui(path)) {
+    if (!path_is_regular_file(path)) {
         state.log.add("Choose a file, not a folder: " + path);
         return;
     }
@@ -339,7 +317,7 @@ void stop_listener(GuiState& state) {
 
 void draw_file_selector(GuiState& state) {
     const bool has_file = state.file_path[0] != '\0';
-    const bool valid_file = has_file && regular_file_for_ui(state.file_path);
+    const bool valid_file = has_file && path_is_regular_file(state.file_path);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, has_file ? ImVec4(1.00f, 1.00f, 1.00f, 1.0f) : ImVec4(0.93f, 0.97f, 1.00f, 1.0f));
     ImGui::BeginChild("file_selector", ImVec2(0, 148), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     const ImVec2 pos = ImGui::GetWindowPos();
@@ -356,7 +334,7 @@ void draw_file_selector(GuiState& state) {
     if (has_file) {
         const std::string path = state.file_path;
         ImGui::TextWrapped("%s", file_name_only(path).c_str());
-        ImGui::TextDisabled("%s", valid_file ? human_size(file_size_or_zero(path)).c_str() : "File is not available");
+        ImGui::TextDisabled("%s", valid_file ? human_size(path_file_size(path)).c_str() : "File is not available");
         ImGui::TextDisabled("%s", path.c_str());
     } else {
         ImGui::TextWrapped("Drag a file into this window, or click Choose File.");
@@ -384,7 +362,7 @@ void draw_send_panel(GuiState& state, const TransferOptions& options) {
     state.udp_port = std::max(1, std::min(65535, state.udp_port));
     draw_file_selector(state);
 
-    const bool file_ready = state.file_path[0] != '\0' && regular_file_for_ui(state.file_path);
+    const bool file_ready = state.file_path[0] != '\0' && path_is_regular_file(state.file_path);
     const bool can_send = file_ready && state.target_host[0] != '\0' && !state.sending.load();
     if (!can_send) {
         ImGui::BeginDisabled();
@@ -413,7 +391,7 @@ void draw_send_panel(GuiState& state, const TransferOptions& options) {
     if (file_ready) {
         const std::string path = state.file_path;
         ImGui::TextWrapped("%s", file_name_only(path).c_str());
-        ImGui::TextDisabled("%s", human_size(file_size_or_zero(path)).c_str());
+        ImGui::TextDisabled("%s", human_size(path_file_size(path)).c_str());
         const auto preview = text_preview(path);
         if (!preview.empty()) {
             ImGui::Separator();
@@ -526,19 +504,38 @@ void load_crisp_font(float scale) {
     io.Fonts->Clear();
     const float size = 15.5f * scale;
 #ifdef _WIN32
-    const char* font_path = "C:/Windows/Fonts/segoeui.ttf";
+    const char* font_paths[] = {
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        nullptr,
+    };
 #elif __APPLE__
-    const char* font_path = "/System/Library/Fonts/SFNS.ttf";
+    const char* font_paths[] = {
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/System/Library/Fonts/SFNS.ttf",
+        nullptr,
+    };
 #else
-    const char* font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    const char* font_paths[] = {
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        nullptr,
+    };
 #endif
     ImFontConfig config;
     config.OversampleH = 3;
     config.OversampleV = 2;
     config.PixelSnapH = true;
-    if (!io.Fonts->AddFontFromFileTTF(font_path, size, &config)) {
-        io.Fonts->AddFontDefault();
+    const ImWchar* ranges = io.Fonts->GetGlyphRangesChineseFull();
+    for (int i = 0; font_paths[i]; ++i) {
+        if (io.Fonts->AddFontFromFileTTF(font_paths[i], size, &config, ranges)) {
+            return;
+        }
     }
+    io.Fonts->AddFontDefault();
 }
 
 float dpi_scale_for_window(SDL_Window* window) {

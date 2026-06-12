@@ -13,6 +13,7 @@ TTrans Windows 安装包
 - 默认 UDP 端口是 44777
 - 接收文件默认保存到程序运行目录下的 downloads 文件夹
 - 发送文件时把文件拖到窗口里的发送区，或点击 Choose File 选择文件
+- 支持中文文件路径和中文文件名
 
 卸载:
 - 开始菜单 -> TTrans -> Uninstall TTrans

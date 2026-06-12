@@ -28,6 +28,7 @@ https://github.com/Pdx247/TTRANS/releases
 - Windows 桌面快捷方式启动无控制台的 `ttrans-gui.exe`
 - Windows 包内置程序图标和运行所需 DLL
 - 发送和接收都保留原始文件名
+- Windows 下支持中文文件路径和中文文件名
 - 跨平台源码：Windows、Linux、macOS
 - 自动发布包：Windows installer zip、Linux ELF tarball、macOS dmg
 

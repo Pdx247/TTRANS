@@ -10,6 +10,11 @@
 #include <sys/stat.h>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <direct.h>
 #endif
 
@@ -18,15 +23,174 @@ namespace {
 
 constexpr std::size_t kMaxDatagram = 1400;
 
-bool regular_file(const std::string& path) {
-    struct stat st {};
-    return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFREG) != 0;
-}
+#ifdef _WIN32
+std::wstring path_to_wide(const std::string& path) {
+    if (path.empty()) {
+        return {};
+    }
 
-uint64_t file_size_of(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    in.seekg(0, std::ios::end);
-    return static_cast<uint64_t>(in.tellg());
+    auto convert = [&path](UINT code_page, DWORD flags) {
+        const int input_size = static_cast<int>(path.size());
+        const int needed = MultiByteToWideChar(code_page, flags, path.data(), input_size, nullptr, 0);
+        if (needed <= 0) {
+            return std::wstring {};
+        }
+        std::wstring wide(static_cast<std::size_t>(needed), L'\0');
+        MultiByteToWideChar(code_page, flags, path.data(), input_size, &wide[0], needed);
+        return wide;
+    };
+
+    auto wide = convert(CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (!wide.empty()) {
+        return wide;
+    }
+    return convert(CP_ACP, 0);
+}
+#endif
+
+class FileReader {
+public:
+    explicit FileReader(const std::string& path) {
+#ifdef _WIN32
+        handle_ = CreateFileW(path_to_wide(path).c_str(),
+                              GENERIC_READ,
+                              FILE_SHARE_READ,
+                              nullptr,
+                              OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+#else
+        in_.open(path, std::ios::binary);
+#endif
+    }
+
+    ~FileReader() {
+#ifdef _WIN32
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+#endif
+    }
+
+    FileReader(const FileReader&) = delete;
+    FileReader& operator=(const FileReader&) = delete;
+
+    bool valid() const {
+#ifdef _WIN32
+        return handle_ != INVALID_HANDLE_VALUE;
+#else
+        return static_cast<bool>(in_);
+#endif
+    }
+
+    std::size_t read(char* data, std::size_t size) {
+        if (!valid() || size == 0) {
+            return 0;
+        }
+#ifdef _WIN32
+        DWORD read_bytes = 0;
+        const auto request = static_cast<DWORD>(std::min<std::size_t>(size, 1u << 20));
+        if (!ReadFile(handle_, data, request, &read_bytes, nullptr)) {
+            return 0;
+        }
+        return static_cast<std::size_t>(read_bytes);
+#else
+        in_.read(data, static_cast<std::streamsize>(size));
+        return static_cast<std::size_t>(in_.gcount());
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    std::ifstream in_;
+#endif
+};
+
+class FileWriter {
+public:
+    explicit FileWriter(const std::string& path) {
+#ifdef _WIN32
+        handle_ = CreateFileW(path_to_wide(path).c_str(),
+                              GENERIC_WRITE,
+                              0,
+                              nullptr,
+                              CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+#else
+        out_.open(path, std::ios::binary);
+#endif
+    }
+
+    ~FileWriter() {
+        close();
+    }
+
+    FileWriter(const FileWriter&) = delete;
+    FileWriter& operator=(const FileWriter&) = delete;
+
+    bool valid() const {
+#ifdef _WIN32
+        return handle_ != INVALID_HANDLE_VALUE;
+#else
+        return static_cast<bool>(out_);
+#endif
+    }
+
+    bool write(const uint8_t* data, std::size_t size) {
+        if (!valid()) {
+            return false;
+        }
+        if (size == 0) {
+            return true;
+        }
+#ifdef _WIN32
+        std::size_t offset = 0;
+        while (offset < size) {
+            const auto request = static_cast<DWORD>(std::min<std::size_t>(size - offset, 1u << 20));
+            DWORD written = 0;
+            if (!WriteFile(handle_, data + offset, request, &written, nullptr) || written == 0) {
+                return false;
+            }
+            offset += static_cast<std::size_t>(written);
+        }
+        return true;
+#else
+        out_.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+        return static_cast<bool>(out_);
+#endif
+    }
+
+    void close() {
+#ifdef _WIN32
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (out_.is_open()) {
+            out_.close();
+        }
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#else
+    std::ofstream out_;
+#endif
+};
+
+bool path_exists(const std::string& path) {
+#ifdef _WIN32
+    return GetFileAttributesW(path_to_wide(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    struct stat st {};
+    return stat(path.c_str(), &st) == 0;
+#endif
 }
 
 std::string filename_only(const std::string& path) {
@@ -43,9 +207,34 @@ std::string filename_only(const std::string& path) {
     return name;
 }
 
-bool path_exists(const std::string& path) {
+bool regular_file(const std::string& path) {
+#ifdef _WIN32
+    const auto attrs = GetFileAttributesW(path_to_wide(path).c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0;
+#else
     struct stat st {};
-    return stat(path.c_str(), &st) == 0;
+    return stat(path.c_str(), &st) == 0 && (st.st_mode & S_IFREG) != 0;
+#endif
+}
+
+uint64_t file_size_of(const std::string& path) {
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA data {};
+    if (!GetFileAttributesExW(path_to_wide(path).c_str(), GetFileExInfoStandard, &data)) {
+        return 0;
+    }
+    ULARGE_INTEGER size {};
+    size.HighPart = data.nFileSizeHigh;
+    size.LowPart = data.nFileSizeLow;
+    return size.QuadPart;
+#else
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        return 0;
+    }
+    in.seekg(0, std::ios::end);
+    return static_cast<uint64_t>(in.tellg());
+#endif
 }
 
 void make_dir_one(const std::string& path) {
@@ -53,7 +242,7 @@ void make_dir_one(const std::string& path) {
         return;
     }
 #ifdef _WIN32
-    _mkdir(path.c_str());
+    CreateDirectoryW(path_to_wide(path).c_str(), nullptr);
 #else
     mkdir(path.c_str(), 0755);
 #endif
@@ -249,8 +438,8 @@ bool receive_accepted_session(UdpSocket& sock,
     send_control(sock, peer, PacketType::MetaAck, meta.session, meta.seq, meta.total);
 
     log_line(log, "Receiving " + info.filename + " from " + peer.host + ":" + std::to_string(peer.port));
-    std::ofstream out(out_path, std::ios::binary);
-    if (!out) {
+    FileWriter out(out_path);
+    if (!out.valid()) {
         log_line(log, "Unable to open output path: " + out_path);
         return false;
     }
@@ -281,7 +470,10 @@ bool receive_accepted_session(UdpSocket& sock,
         if (chunk.seq != expected_seq) {
             continue;
         }
-        out.write(reinterpret_cast<const char*>(chunk.payload.data()), static_cast<std::streamsize>(chunk.payload.size()));
+        if (!out.write(chunk.payload.data(), chunk.payload.size())) {
+            log_line(log, "Unable to write output path: " + out_path);
+            return false;
+        }
         for (auto b : chunk.payload) {
             hash ^= b;
             hash *= 1099511628211ull;
@@ -327,18 +519,39 @@ bool receive_accepted_session(UdpSocket& sock,
 } // namespace
 
 uint64_t fnv1a_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
+    FileReader in(path);
     uint64_t hash = 14695981039346656037ull;
     std::array<char, 8192> buffer{};
-    while (in) {
-        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const auto count = in.gcount();
-        for (std::streamsize i = 0; i < count; ++i) {
-            hash ^= static_cast<unsigned char>(buffer[static_cast<std::size_t>(i)]);
+    while (in.valid()) {
+        const auto count = in.read(buffer.data(), buffer.size());
+        if (count == 0) {
+            break;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            hash ^= static_cast<unsigned char>(buffer[i]);
             hash *= 1099511628211ull;
         }
     }
     return hash;
+}
+
+bool path_is_regular_file(const std::string& path) {
+    return regular_file(path);
+}
+
+uint64_t path_file_size(const std::string& path) {
+    return file_size_of(path);
+}
+
+std::string read_file_head(const std::string& path, std::size_t max_bytes) {
+    FileReader in(path);
+    if (!in.valid() || max_bytes == 0) {
+        return {};
+    }
+    std::string data(max_bytes, '\0');
+    const auto count = in.read(&data[0], data.size());
+    data.resize(count);
+    return data;
 }
 
 bool send_file(const std::string& host,
@@ -348,6 +561,11 @@ bool send_file(const std::string& host,
                const LogFn& log) {
     if (!regular_file(path)) {
         log_line(log, "File not found: " + path);
+        return false;
+    }
+    FileReader in(path);
+    if (!in.valid()) {
+        log_line(log, "Unable to open file: " + path);
         return false;
     }
     const auto file_size = file_size_of(path);
@@ -376,11 +594,9 @@ bool send_file(const std::string& host,
         return false;
     }
 
-    std::ifstream in(path, std::ios::binary);
     std::vector<char> buffer(options.chunk_size);
     for (uint32_t seq = 1; seq <= total; ++seq) {
-        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const auto count = in.gcount();
+        const auto count = in.read(buffer.data(), buffer.size());
         Packet chunk;
         chunk.type = PacketType::Data;
         chunk.session = session;

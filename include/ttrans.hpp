@@ -77,6 +77,9 @@ bool decode_packet(const uint8_t* data, std::size_t size, Packet& packet);
 
 uint64_t fnv1a_file(const std::string& path);
 std::string hex64(uint64_t value);
+bool path_is_regular_file(const std::string& path);
+uint64_t path_file_size(const std::string& path);
+std::string read_file_head(const std::string& path, std::size_t max_bytes);
 
 bool send_file(const std::string& host,
                uint16_t port,

@@ -70,7 +70,7 @@ target_link_libraries(ttrans PRIVATE imgui OpenGL::GL)
 if(WIN32)
     set_source_files_properties(assets/ttrans.rc PROPERTIES COMPILE_OPTIONS "-I${CMAKE_CURRENT_SOURCE_DIR}/assets")
     target_sources(ttrans PRIVATE assets/ttrans.rc)
-    target_link_libraries(ttrans PRIVATE ws2_32 comdlg32)
+    target_link_libraries(ttrans PRIVATE ws2_32 shell32 comdlg32)
 endif()
 
 add_executable(ttrans-gui

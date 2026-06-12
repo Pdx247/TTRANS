@@ -2,8 +2,15 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <shellapi.h>
+#endif
 
 namespace {
 
@@ -64,10 +71,46 @@ void apply_common_options(const std::vector<std::string>& args, ttrans::Transfer
     }
 }
 
+#ifdef _WIN32
+std::string wide_to_utf8(const wchar_t* text) {
+    if (!text) {
+        return {};
+    }
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    if (size <= 1) {
+        return {};
+    }
+    std::string out(static_cast<std::size_t>(size - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, &out[0], size, nullptr, nullptr);
+    return out;
+}
+#endif
+
+std::vector<std::string> collect_args(int argc, char** argv) {
+#ifdef _WIN32
+    int argc_w = 0;
+    LPWSTR* argv_w = CommandLineToArgvW(GetCommandLineW(), &argc_w);
+    std::vector<std::string> args;
+    for (int i = 1; argv_w && i < argc_w; ++i) {
+        args.push_back(wide_to_utf8(argv_w[i]));
+    }
+    if (argv_w) {
+        LocalFree(argv_w);
+    }
+    return args;
+#else
+    return std::vector<std::string>(argv + 1, argv + argc);
+#endif
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    std::vector<std::string> args(argv + 1, argv + argc);
+#ifdef _WIN32
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+#endif
+    std::vector<std::string> args = collect_args(argc, argv);
     if (args.empty() || args[0] == "--help" || args[0] == "-h") {
         print_help();
         return args.empty() ? 1 : 0;
