@@ -20,7 +20,16 @@ rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"
 cp "$BUILD/ttrans.exe" "$PACKAGE_DIR/ttrans.exe"
 cp "$MINGW_PREFIX/bin/SDL2.dll" "$PACKAGE_DIR/SDL2.dll"
+for dll in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll; do
+  if [ -f "$MINGW_PREFIX/bin/$dll" ]; then
+    cp "$MINGW_PREFIX/bin/$dll" "$PACKAGE_DIR/$dll"
+  else
+    echo "Required runtime DLL not found: $MINGW_PREFIX/bin/$dll" >&2
+    exit 1
+  fi
+done
 cp "$ROOT"/packaging/windows/* "$PACKAGE_DIR/"
+"$PACKAGE_DIR/ttrans.exe" --help >/dev/null
 rm -f "$ZIP"
 (cd "$PACKAGE_DIR" && cmake -E tar cf "$ZIP" --format=zip .)
 echo "Packaged $ZIP"
