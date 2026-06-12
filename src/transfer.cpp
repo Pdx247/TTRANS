@@ -243,6 +243,7 @@ bool receive_accepted_session(UdpSocket& sock,
                               const Endpoint& peer,
                               const std::string& output_dir,
                               const IncomingFile& info,
+                              const StopFn& should_stop,
                               const LogFn& log) {
     const auto out_path = preserved_output_path(output_dir, info.filename);
     send_control(sock, peer, PacketType::MetaAck, meta.session, meta.seq, meta.total);
@@ -259,6 +260,9 @@ bool receive_accepted_session(UdpSocket& sock,
     Endpoint from;
     std::vector<uint8_t> raw;
     while (expected_seq <= meta.total) {
+        if (should_stop && should_stop()) {
+            return false;
+        }
         if (!sock.recv_bytes(raw, from, kMaxDatagram)) {
             continue;
         }
@@ -290,6 +294,9 @@ bool receive_accepted_session(UdpSocket& sock,
     out.close();
 
     while (true) {
+        if (should_stop && should_stop()) {
+            return false;
+        }
         if (!sock.recv_bytes(raw, from, kMaxDatagram)) {
             continue;
         }
@@ -430,7 +437,7 @@ bool receive_once(uint16_t port,
     }
 
     const auto info = parse_incoming_file(meta, peer);
-    return receive_accepted_session(sock, meta, peer, output_dir, info, log);
+    return receive_accepted_session(sock, meta, peer, output_dir, info, StopFn(), log);
 }
 
 bool receive_forever(uint16_t port,
@@ -464,7 +471,7 @@ bool receive_forever(uint16_t port,
             log_line(log, "Rejected " + info.filename);
             continue;
         }
-        if (!receive_accepted_session(sock, meta, peer, output_dir, info, log)) {
+        if (!receive_accepted_session(sock, meta, peer, output_dir, info, should_stop, log)) {
             log_line(log, "Receive failed for " + info.filename);
         }
     }
