@@ -525,22 +525,44 @@ void section_label(const char* text) {
     ImGui::NewLine();
 }
 
+ImVec2 centered_button_size(const char* text, const ImVec2& requested) {
+    ImVec2 size = requested;
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImVec2 text_size = ImGui::CalcTextSize(text);
+    const float min_width = text_size.x + style.FramePadding.x * 2.0f + 10.0f;
+    const float min_height = text_size.y + style.FramePadding.y * 2.0f + 2.0f;
+    if (size.x > 0.0f) {
+        size.x = std::max(size.x, min_width);
+    }
+    if (size.y > 0.0f) {
+        size.y = std::max(size.y, min_height);
+    }
+    return size;
+}
+
 bool primary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 7));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.05f, 0.34f, 0.74f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.06f, 0.41f, 0.86f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.04f, 0.27f, 0.62f, 1.0f));
-    const bool clicked = ImGui::Button(text, size);
-    ImGui::PopStyleColor(3);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    const bool clicked = ImGui::Button(text, centered_button_size(text, size));
+    ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
     return clicked;
 }
 
 bool secondary_button(const char* text, const ImVec2& size = ImVec2(0, 0)) {
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.5f, 0.5f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12, 7));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.94f, 0.96f, 0.99f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.89f, 0.93f, 0.99f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.84f, 0.89f, 0.97f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.11f, 0.17f, 0.26f, 1.0f));
-    const bool clicked = ImGui::Button(text, size);
+    const bool clicked = ImGui::Button(text, centered_button_size(text, size));
     ImGui::PopStyleColor(4);
+    ImGui::PopStyleVar(2);
     return clicked;
 }
 
@@ -1022,9 +1044,9 @@ void draw_file_row(GuiState& state, std::size_t index) {
         ImGui::TextDisabled(".%s  %s", ext.c_str(), human_size(size).c_str());
     }
     ImGui::EndGroup();
-    ImGui::SameLine(ImGui::GetWindowWidth() - 66.0f);
+    ImGui::SameLine(ImGui::GetWindowWidth() - 86.0f);
     ImGui::PushID(static_cast<int>(index));
-    if (secondary_button("移除", ImVec2(48, 28))) {
+    if (secondary_button("Remove", ImVec2(68, 30))) {
         state.files.erase(state.files.begin() + static_cast<std::ptrdiff_t>(index));
         set_status(state, "");
     }
@@ -1134,6 +1156,7 @@ void apply_style() {
     style.GrabRounding = 5.0f;
     style.WindowPadding = ImVec2(14, 12);
     style.FramePadding = ImVec2(10, 7);
+    style.ButtonTextAlign = ImVec2(0.5f, 0.5f);
     style.ItemSpacing = ImVec2(10, 9);
     style.ItemInnerSpacing = ImVec2(8, 6);
     style.ScrollbarSize = 12.0f;
